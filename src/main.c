@@ -32,21 +32,20 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     return VK_FALSE;
 }
 
-void initWindow() {
+bool initWindow() {
     printf("Trying to initialize window.\n");
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         fprintf(stderr, "Failed to initialize SDL: %s\n", SDL_GetError());
-        exit(EXIT_FAILURE);
+        return false;
     }
-
 
     if (!SDL_Vulkan_LoadLibrary(NULL)) {
         printf("Vulkan support is available.\n");
     } else {
         fprintf(stderr, "Vulkan support not found: %s\n", SDL_GetError());
         SDL_Quit();
-        exit(EXIT_FAILURE);
+        return false;
     }
     SDL_Vulkan_LoadLibrary(NULL);
 
@@ -62,12 +61,13 @@ void initWindow() {
     if (!g_window) {
         printf("Failed to create SDL window: %s\n", SDL_GetError());
         SDL_Quit();
-        exit(EXIT_FAILURE);
+        return false;
     }
 
     SDL_SetWindowResizable(g_window, SDL_FALSE);
 
     printf("Successfully initialized window.\n");
+    return true;
 }
 
 void handleInput(const SDL_Event e) {
@@ -188,6 +188,7 @@ bool initInstance() {
     const char** temp = realloc(required_extensions, (required_extension_count + 2) * sizeof(const char*));
     if(temp == NULL) {
         fprintf(stderr, "Failed to reallocate for MacOS specific extensions.");
+        free(required_extensions);
         return false;
     }
     required_extensions = temp;
@@ -218,6 +219,7 @@ bool initInstance() {
         }
         if(!found) {
             fprintf(stderr, "Failed to find required extension '%s'", required_extensions[i]);
+            free(available_extensions); free(required_extensions);
             return false;
         }
     }
@@ -245,33 +247,29 @@ bool initInstance() {
 
     if(vkCreateInstance(&create_info, NULL, &g_instance) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create Vulkan instance!");
+        free(available_extensions); free(required_extensions);
         return false;
     }
-    free(available_extensions);
-    free(required_extensions);
 
+    free(available_extensions); free(required_extensions);
     return true;
 }
 
 int main() {
-    initWindow();
+    if(!initWindow()) return EXIT_FAILURE;
     if(!initInstance()) return EXIT_FAILURE;
 
-    /*
     SDL_Event e;
     while (g_is_running){
         while (SDL_PollEvent(&e)){
             handleInput(e);
         }
     }
-    */
-
 
     vkDestroyInstance(g_instance, NULL);
 
-    // ReSharper disable once CppDFAConstantConditions
     if(g_window) SDL_DestroyWindow(g_window);
     SDL_Quit();
 
-    return EXIT_FAILURE;
+    return EXIT_SUCCESS;
 }
