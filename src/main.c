@@ -8,13 +8,16 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <time.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <arm/limits.h>
 #include <sys/stat.h>
+
 #include <cglm/cglm.h>
+#include <cglm/quat.h>
 
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tinyobj_loader_c.h>
@@ -40,6 +43,14 @@
 #define MAX_FRAMES_IN_FLIGHT 2
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+#define quat vec4
+
+const float PI = M_PI;
+const float PI_2 = 2.0f * M_PI;
+const float PI_HALF = M_PI / 2.0f;
+const float PI_QUARTER = M_PI / 4.0f;
+const float PI_DEG = 90.0f;
 
 /* DEBUG FEATURE FLAGS */
 #define MALLOC_DEBUG true
@@ -220,6 +231,24 @@ char *readFile(const char *filename, size_t *out_size) {
 }
 
 typedef struct {
+    vec3 pos;
+    vec3 normal;
+    vec2 texCoord;
+} Vertex;
+
+typedef struct {
+    vec3 position    __attribute__((aligned(16)));
+    quat rotation;
+    vec3 scale       __attribute__((aligned(16)));
+} Transform;
+
+typedef struct {
+    mat4 model;
+    mat4 view;
+    mat4 proj;
+} UniformBufferObject ;
+
+typedef struct {
     vec3 cameraEye    __attribute__((aligned(16)));
     vec3 cameraCenter __attribute__((aligned(16)));
     vec3 cameraUp     __attribute__((aligned(16)));
@@ -275,6 +304,10 @@ VkImage g_texture_image;
 VkDeviceMemory g_texture_image_memory;
 VkImageView g_texture_image_view;
 VkSampler g_texture_sampler;
+
+VkBuffer* g_uniform_buffers;
+VkDeviceMemory* g_uniform_buffers_memory;
+void** g_uniform_buffers_mapped;
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     // ReSharper disable once CppParameterMayBeConst
@@ -1047,11 +1080,6 @@ VkShaderModule createShaderModule(const char* code, size_t code_length) {
     return shaderModule;
 }
 
-typedef struct {
-    vec3 pos;
-    vec3 normal;
-    vec2 texCoord;
-} Vertex;
 
 VkVertexInputBindingDescription getVertexBindingDescription() {
     const VkVertexInputBindingDescription bindingDescription = {
@@ -1704,6 +1732,49 @@ void createTextureImage() {
     generateMipmaps(g_texture_image, VK_FORMAT_R8G8B8A8_SRGB, texWidth, texHeight, g_mip_levels);
 }
 
+void createUniformBuffers() {
+    const size_t num_models = 2;
+    const size_t total_buffers = MAX_FRAMES_IN_FLIGHT * num_models;
+
+    g_uniform_buffers = malloc(total_buffers * sizeof(VkBuffer));
+    g_uniform_buffers_memory = malloc(total_buffers * sizeof(VkDeviceMemory));
+    g_uniform_buffers_mapped = malloc(total_buffers * sizeof(void*));
+
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        for (size_t j = 0; j < num_models; j++) {
+            const VkDeviceSize buffer_size = sizeof(UniformBufferObject);
+            const size_t bufferIndex = i * num_models + j;
+            createBuffer(
+                buffer_size,
+                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                &g_uniform_buffers[bufferIndex],
+                &g_uniform_buffers_memory[bufferIndex]
+            );
+            const VkResult result = vkMapMemory(
+                g_device,
+                g_uniform_buffers_memory[bufferIndex],
+                0,
+                buffer_size,
+                0,
+                &g_uniform_buffers_mapped[bufferIndex]
+            );
+            if(result != VK_SUCCESS) PANIC("failed to map uniform buffer memory!");
+        }
+    }
+}
+
+void cleanupUniformBuffers() {
+    const size_t num_models = 2;
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        for (size_t j = 0; j < num_models; j++) {
+            const size_t buffer_index = i * num_models + j;
+            vkDestroyBuffer(g_device, g_uniform_buffers[buffer_index], NULL);
+            vkFreeMemory(g_device, g_uniform_buffers_memory[buffer_index], NULL);
+        }
+    }
+}
+
 int main() {
     printf("Initializing window.\n");
     initWindow();
@@ -1748,6 +1819,20 @@ int main() {
     printf("Creating Texture Sampler\n");
     createTextureSampler();
 
+    printf("Instantiating Models!\n");
+    Transform torus_transform = {
+        {0.0f, 0.0f, 0.0f},
+        {0.0f, 0.0f, 0.0f, 1.0f},
+        {1.0f, 1.0f, 1.0f}};
+
+    Transform sphere_transform = {
+        {3.0f, 0.0f, 0.0f},
+        {0.0f, 0.0f, 0.0f, 1.0f},
+        {1.0f, 1.0f, 1.0f}};
+    printf("Successfully instantiated Models!\n");
+
+    createUniformBuffers();
+
     SDL_Event e;
     g_is_running = true;
     while (g_is_running){
@@ -1759,6 +1844,8 @@ int main() {
     /*
      * CLEANUP Code
      */
+    cleanupUniformBuffers();
+
     vkDestroySampler(g_device, g_texture_sampler, NULL); g_texture_sampler = VK_NULL_HANDLE;
     vkDestroyImageView(g_device, g_texture_image_view, NULL); g_texture_image_view = VK_NULL_HANDLE;
     vkFreeMemory(g_device, g_texture_image_memory, NULL); g_texture_image_memory = VK_NULL_HANDLE;
