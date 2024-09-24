@@ -19,6 +19,9 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tinyobj_loader_c.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+
 #define DEFAULT_WINDOW_WIDTH 800
 #define DEFAULT_WINDOW_HEIGHT 600
 #define PROJECT_NAME "Vulkan Engine"
@@ -36,7 +39,14 @@
 
 #define MAX_FRAMES_IN_FLIGHT 2
 
-// Typedef for the Timer struct
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+/* DEBUG FEATURE FLAGS */
+#define MALLOC_DEBUG true
+#define REALLOC_DEBUG true
+#define FREE_DEBUG true
+#define SCOPE_TIMER_ENABLED true
+
 typedef struct Timer {
     clock_t start;
     const char *file;
@@ -56,19 +66,21 @@ void start_timer(Timer* t, const char* file, const int line, const char* func) {
 void stop_timer(const Timer* t) {
     const clock_t end = clock();
     const double elapsed = (double)(end - t->start) / CLOCKS_PER_SEC;
-    printf("[[DS-SCOPE_TIMER]] %s | File: %s | Line: %d | Function: %s | Elapsed time: %.3f seconds\n", t->info, t->file, t->line, t->func, elapsed);
+
+    if(elapsed < 1.0) {
+        printf("[[DS-SCOPE_TIMER]] %s | File: %s | Line: %d | Function: %s | Elapsed time: %.3f milliseconds\n",
+                                   t->info, t->file, t->line, t->func, elapsed * 1000.0);
+    } else {
+        printf("[[DS-SCOPE_TIMER]] %s | File: %s | Line: %d | Function: %s | Elapsed time: %.3f seconds\n",
+                                   t->info, t->file, t->line, t->func, elapsed);
+    }
 }
 
-// Cleanup function: Automatically called when the Timer goes out of scope
-void timer_cleanup(const Timer* t) {
-    stop_timer(t);
-}
+void timer_cleanup(const Timer* t) { stop_timer(t); }
 
-// Macro to declare a Timer that automatically stops when leaving scope
 #define SCOPE_TIMER __attribute__((cleanup(timer_cleanup))) \
 Timer _timer_instance; \
 start_timer(&_timer_instance, __FILE__, __LINE__, __func__);
-
 
 // PANIC macro to print error details (with file, line, and function info) and abort
 // While not very clean I am explicitly fine with memory leaks when PANIC is called during the initialization
@@ -102,7 +114,7 @@ start_timer(&_timer_instance, __FILE__, __LINE__, __func__);
         void* ptr = malloc(size);  // Call the real malloc
         #define malloc(size) debug_malloc(size, __FILE__, __LINE__, __func__)
 
-        if (ptr == NULL) PANIC("[[DS-MEMORY]] Failed to allocate %zu bytes in file %s, line %d, function %s", size, file, line, func);
+        if(ptr == NULL) PANIC("[[DS-MEMORY]] Failed to allocate %zu bytes in file %s, line %d, function %s", size, file, line, func);
         printf("Pointer allocated at: %p\n", ptr);
         return ptr;
     }
@@ -115,7 +127,7 @@ start_timer(&_timer_instance, __FILE__, __LINE__, __func__);
         void* new_ptr = realloc(ptr, size);  // Call the real realloc
         #define realloc(ptr, size) debug_realloc(ptr, size, __FILE__, __LINE__, __func__)
 
-        if (new_ptr == NULL) PANIC("[[DS-MEMORY]] Failed to reallocate %zu bytes in file %s, line %d, function %s", size, file, line, func);
+        if(new_ptr == NULL) PANIC("[[DS-MEMORY]] Failed to reallocate %zu bytes in file %s, line %d, function %s", size, file, line, func);
         printf("Pointer reallocated at: %p\n", new_ptr);
         return new_ptr;
     }
@@ -134,39 +146,48 @@ start_timer(&_timer_instance, __FILE__, __LINE__, __func__);
 // Function to check if the file is a regular file using stat
 int is_regular_file(const char *filename) {
     struct stat fileStat;
-    if (stat(filename, &fileStat) != 0) return 0; // File does not exist or is in an error state
+    if(stat(filename, &fileStat) != 0) return 0; // File does not exist or is in an error state
     return S_ISREG(fileStat.st_mode); // Check if it's a regular file
+}
+
+bool file_exists(const char *filepath) {
+    FILE *file = fopen(filepath, "r");
+    if(file) {
+        fclose(file);
+        return true;
+    }
+    return false;
 }
 
 //@DS:NEEDS_FREE_AFTER_USE
 char *readFile(const char *filename, size_t *out_size) {
     // First check if the file exists and is a regular file
-    if (!is_regular_file(filename)) {
+    if(!is_regular_file(filename)) {
         fprintf(stderr, "Error: '%s' is not a regular file or does not exist.\n", filename);
         return NULL;
     }
 
     FILE *file = fopen(filename, "rb");
-    if (!file) {
+    if(!file) {
         fprintf(stderr, "Error: Unable to open file '%s': %s\n", filename, strerror(errno));
         return NULL;
     }
 
     // Seek to the end to determine the file size
-    if (fseek(file, 0, SEEK_END) != 0) {
+    if(fseek(file, 0, SEEK_END) != 0) {
         fprintf(stderr, "Error: Unable to seek to the end of file '%s'\n", filename);
         fclose(file);
         return NULL;
     }
 
     const long fileSize = ftell(file);
-    if (fileSize == -1L) {
+    if(fileSize == -1L) {
         fprintf(stderr, "Error: Unable to get file size of '%s'\n", filename);
         fclose(file);
         return NULL;
     }
 
-    if (fileSize > LONG_MAX) {
+    if(fileSize > LONG_MAX) {
         fprintf(stderr, "Error: File size exceeds maximum supported size.\n");
         fclose(file);
         return NULL;
@@ -179,7 +200,7 @@ char *readFile(const char *filename, size_t *out_size) {
 
     // Allocate buffer for the file content
     char *buffer = malloc(*out_size);
-    if (!buffer) {
+    if(!buffer) {
         fprintf(stderr, "Error: Memory allocation failed for file '%s'\n", filename);
         fclose(file);
         return NULL;
@@ -187,7 +208,7 @@ char *readFile(const char *filename, size_t *out_size) {
 
     // Read the file into the buffer
     const size_t bytesRead = fread(buffer, 1, *out_size, file);
-    if (bytesRead != *out_size) {
+    if(bytesRead != *out_size) {
         fprintf(stderr, "Error: Unable to read entire file '%s'\n", filename);
         free(buffer);
         fclose(file);
@@ -248,6 +269,12 @@ VkQueue g_presentation_queue = VK_NULL_HANDLE;
 VkDebugUtilsMessengerEXT g_debug_messenger;
 
 bool g_is_running = false;
+
+uint32_t g_mip_levels = UINT32_UNINITIALIZED_VALUE;
+VkImage g_texture_image;
+VkDeviceMemory g_texture_image_memory;
+VkImageView g_texture_image_view;
+VkSampler g_texture_sampler;
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     // ReSharper disable once CppParameterMayBeConst
@@ -441,9 +468,7 @@ void initInstance() {
         create_info.ppEnabledLayerNames = (const char*[]){"VK_LAYER_KHRONOS_validation"};
         create_info.enabledLayerCount = 1;
         create_info.pNext = &debug_utils_messenger_create_info;
-    } else {
-        create_info.enabledLayerCount = 0; create_info.pNext = NULL;
-    }
+    } else { create_info.enabledLayerCount = 0; create_info.pNext = NULL; }
 
     if(vkCreateInstance(&create_info, NULL, &g_instance) != VK_SUCCESS) PANIC("Failed to create Vulkan instance!");
     free(required_extensions);
@@ -514,7 +539,7 @@ typedef struct {
 }SwapChainSupportDetails;
 
 void SwapChainSupportDetails_free(SwapChainSupportDetails* details) {
-    if (details == NULL) return;
+    if(details == NULL) return;
     free(details->formats); free(details->present_modes);
     details->formats = NULL; details->present_modes = NULL;
 
@@ -621,12 +646,12 @@ VkSampleCountFlagBits getMaxUsableSampleCount() {
     vkGetPhysicalDeviceProperties(g_physical_device, &physicalDeviceProperties);
 
     const VkSampleCountFlags counts = physicalDeviceProperties.limits.framebufferColorSampleCounts & physicalDeviceProperties.limits.framebufferDepthSampleCounts;
-    if (counts & VK_SAMPLE_COUNT_64_BIT) return VK_SAMPLE_COUNT_64_BIT;
-    if (counts & VK_SAMPLE_COUNT_32_BIT) return VK_SAMPLE_COUNT_32_BIT;
-    if (counts & VK_SAMPLE_COUNT_16_BIT) return VK_SAMPLE_COUNT_16_BIT;
-    if (counts & VK_SAMPLE_COUNT_8_BIT) return VK_SAMPLE_COUNT_8_BIT;
-    if (counts & VK_SAMPLE_COUNT_4_BIT) return VK_SAMPLE_COUNT_4_BIT;
-    if (counts & VK_SAMPLE_COUNT_2_BIT) return VK_SAMPLE_COUNT_2_BIT;
+    if(counts & VK_SAMPLE_COUNT_64_BIT) return VK_SAMPLE_COUNT_64_BIT;
+    if(counts & VK_SAMPLE_COUNT_32_BIT) return VK_SAMPLE_COUNT_32_BIT;
+    if(counts & VK_SAMPLE_COUNT_16_BIT) return VK_SAMPLE_COUNT_16_BIT;
+    if(counts & VK_SAMPLE_COUNT_8_BIT) return VK_SAMPLE_COUNT_8_BIT;
+    if(counts & VK_SAMPLE_COUNT_4_BIT) return VK_SAMPLE_COUNT_4_BIT;
+    if(counts & VK_SAMPLE_COUNT_2_BIT) return VK_SAMPLE_COUNT_2_BIT;
     return VK_SAMPLE_COUNT_1_BIT;
 }
 
@@ -704,7 +729,7 @@ void createLogicalDevice() {
         createInfo.ppEnabledLayerNames = (const char*[]){"VK_LAYER_KHRONOS_validation"};
     }
 
-    if (vkCreateDevice(g_physical_device, &createInfo, NULL, &g_device) != VK_SUCCESS) PANIC("Failed to create device.");
+    if(vkCreateDevice(g_physical_device, &createInfo, NULL, &g_device) != VK_SUCCESS) PANIC("Failed to create device.");
 
     vkGetDeviceQueue(g_device, indices.graphicsFamily, 0, &g_graphics_queue);
     vkGetDeviceQueue(g_device, indices.presentationFamily, 0, &g_presentation_queue);
@@ -748,20 +773,20 @@ VkPresentModeKHR chooseSwapPresentMode(const VkPresentModeKHR* available_present
 
 VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR* capabilities) {
     const bool isExtentUndefined = capabilities->currentExtent.width == UINT32_UNINITIALIZED_VALUE;
-    if (!isExtentUndefined) return capabilities->currentExtent;
+    if(!isExtentUndefined) return capabilities->currentExtent;
 
     int width = 0; int height = 0;
     SDL_Vulkan_GetDrawableSize(g_window, &width, &height);
     uint32_t clampedWidth = width;
-    if (clampedWidth < capabilities->minImageExtent.width)
+    if(clampedWidth < capabilities->minImageExtent.width)
         clampedWidth = capabilities->minImageExtent.width;
-    if (clampedWidth > capabilities->maxImageExtent.width)
+    if(clampedWidth > capabilities->maxImageExtent.width)
         clampedWidth = capabilities->maxImageExtent.width;
 
     uint32_t clampedHeight = height;
-    if (clampedHeight < capabilities->minImageExtent.height)
+    if(clampedHeight < capabilities->minImageExtent.height)
         clampedHeight = capabilities->minImageExtent.height;
-    if (clampedHeight > capabilities->maxImageExtent.height)
+    if(clampedHeight > capabilities->maxImageExtent.height)
         clampedHeight = capabilities->maxImageExtent.height;
     const VkExtent2D actualExtent = {
         .width = clampedWidth,
@@ -785,7 +810,7 @@ VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags a
             .layerCount = 1},
     };
     VkImageView imageView = VK_NULL_HANDLE;
-    if (vkCreateImageView(g_device, &viewInfo, NULL, &imageView) != VK_SUCCESS) PANIC("Failed to create texture image view!");
+    if(vkCreateImageView(g_device, &viewInfo, NULL, &imageView) != VK_SUCCESS) PANIC("Failed to create texture image view!");
     return imageView;
 }
 
@@ -793,16 +818,16 @@ void createSwapChain() {
     SwapChainSupportDetails details;
     querySwapChainSupport(g_physical_device, &details);
 
-    VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(details.formats, details.num_formats);
-    VkPresentModeKHR presentMode = chooseSwapPresentMode(details.present_modes, details.num_present_modes);
-    VkExtent2D extent = chooseSwapExtent(&details.capabilities);
+    const VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(details.formats, details.num_formats);
+    const VkPresentModeKHR presentMode = chooseSwapPresentMode(details.present_modes, details.num_present_modes);
+    const VkExtent2D extent = chooseSwapExtent(&details.capabilities);
 
     // Limit the number of swap chain images to MAX_FRAMES_IN_FLIGHT
     g_num_swap_chain_images = MAX_FRAMES_IN_FLIGHT;
 
     // Ensure imageCount is within the allowed range
-    if (g_num_swap_chain_images < details.capabilities.minImageCount) g_num_swap_chain_images = details.capabilities.minImageCount;
-    if (g_num_swap_chain_images > details.capabilities.maxImageCount) g_num_swap_chain_images = details.capabilities.maxImageCount;
+    if(g_num_swap_chain_images < details.capabilities.minImageCount) g_num_swap_chain_images = details.capabilities.minImageCount;
+    if(g_num_swap_chain_images > details.capabilities.maxImageCount) g_num_swap_chain_images = details.capabilities.maxImageCount;
     if(g_num_swap_chain_images == 0) PANIC("swap chain image count is 0!");
 
     VkSwapchainCreateInfoKHR createInfo = {
@@ -824,7 +849,7 @@ void createSwapChain() {
     QueueFamilyIndices queue_family_indices = findQueueFamilies(g_physical_device);
     if(!QueueFamilyIndices_isComplete(&queue_family_indices)) PANIC("queueFamilies is not complete!");
 
-    if (queue_family_indices.graphicsFamily != queue_family_indices.presentationFamily) {
+    if(queue_family_indices.graphicsFamily != queue_family_indices.presentationFamily) {
         fprintf(stdout, "Setting imageSharingMode to Concurrent.\n");
         createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
         createInfo.queueFamilyIndexCount = 2;
@@ -866,12 +891,12 @@ VkFormat findSupportedFormat(const VkFormat* candidates, uint32_t num_candidates
         VkFormatProperties props;
         vkGetPhysicalDeviceFormatProperties(g_physical_device, format, &props);
 
-        if (tiling == VK_IMAGE_TILING_LINEAR) {
-            if ((props.linearTilingFeatures & features) == features) {
+        if(tiling == VK_IMAGE_TILING_LINEAR) {
+            if((props.linearTilingFeatures & features) == features) {
                 return format;
             }
-        } else if (tiling == VK_IMAGE_TILING_OPTIMAL) {
-            if ((props.optimalTilingFeatures & features) == features) {
+        } else if(tiling == VK_IMAGE_TILING_OPTIMAL) {
+            if((props.optimalTilingFeatures & features) == features) {
                 return format;
             }
         }
@@ -957,7 +982,7 @@ void createRenderPass() {
         .pDependencies = &dependency
     };
 
-    if (vkCreateRenderPass(g_device, &renderPassInfo, NULL, &g_render_pass) != VK_SUCCESS) PANIC("failed to create render pass!");
+    if(vkCreateRenderPass(g_device, &renderPassInfo, NULL, &g_render_pass) != VK_SUCCESS) PANIC("failed to create render pass!");
 }
 
 void createDescriptorSetLayout() {
@@ -979,7 +1004,7 @@ void createDescriptorSetLayout() {
         .bindingCount = 2,
         .pBindings = (VkDescriptorSetLayoutBinding[]){uboLayoutBinding, samplerLayoutBinding}};
 
-    if (vkCreateDescriptorSetLayout(g_device, &layoutInfo, NULL, &g_descriptor_set_layout) != VK_SUCCESS) PANIC("failed to create descriptor set layout!");
+    if(vkCreateDescriptorSetLayout(g_device, &layoutInfo, NULL, &g_descriptor_set_layout) != VK_SUCCESS) PANIC("failed to create descriptor set layout!");
 }
 
 VkShaderModule createShaderModule(const char* code, size_t code_length) {
@@ -989,7 +1014,7 @@ VkShaderModule createShaderModule(const char* code, size_t code_length) {
         .pCode = (const uint32_t *)code
     };
     VkShaderModule shaderModule = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(g_device, &createInfo, NULL, &shaderModule) != VK_SUCCESS) PANIC("Failed to create shader!");
+    if(vkCreateShaderModule(g_device, &createInfo, NULL, &shaderModule) != VK_SUCCESS) PANIC("Failed to create shader!");
     return shaderModule;
 }
 
@@ -1035,10 +1060,10 @@ void createGraphicsPipeline() {
     size_t vertShaderCode_length; size_t fragShaderCode_length;
     // ReSharper disable once CppDFAMemoryLeak
     const char* vertShaderCode = readFile("shaders/compiled/shader_phong_stages.vert.spv", &vertShaderCode_length);
-    if (!vertShaderCode) PANIC("Could not read vertex shader file.");
+    if(!vertShaderCode) PANIC("Could not read vertex shader file.");
     // ReSharper disable once CppDFAMemoryLeak
     const char* fragShaderCode = readFile("shaders/compiled/shader_phong_stages.frag.spv", &fragShaderCode_length);
-    if (!fragShaderCode) PANIC("Could not read fragment shader file.");
+    if(!fragShaderCode) PANIC("Could not read fragment shader file.");
 
     fprintf(stdout, "\tTrying to create Vertex Shader.\n");
     VkShaderModule vertShaderModule = createShaderModule(vertShaderCode, vertShaderCode_length);
@@ -1154,7 +1179,7 @@ void createGraphicsPipeline() {
         .pushConstantRangeCount = 1,
         .pPushConstantRanges = &pushConstantRange};
 
-    if (vkCreatePipelineLayout(g_device, &pipelineLayoutInfo, NULL, &g_pipeline_layout) != VK_SUCCESS) PANIC("failed to create pipeline layout!");
+    if(vkCreatePipelineLayout(g_device, &pipelineLayoutInfo, NULL, &g_pipeline_layout) != VK_SUCCESS) PANIC("failed to create pipeline layout!");
 
     VkGraphicsPipelineCreateInfo pipelineInfo = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -1173,7 +1198,7 @@ void createGraphicsPipeline() {
         .subpass = 0,
         .basePipelineHandle = VK_NULL_HANDLE};
 
-    if (vkCreateGraphicsPipelines(g_device, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, &g_graphics_pipeline) != VK_SUCCESS) PANIC("failed to create graphics pipeline!");
+    if(vkCreateGraphicsPipelines(g_device, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, &g_graphics_pipeline) != VK_SUCCESS) PANIC("failed to create graphics pipeline!");
 
     fprintf(stdout, "Cleaning up shader modules.\n");
     vkDestroyShaderModule(g_device, fragShaderModule, NULL);
@@ -1190,7 +1215,7 @@ void createCommandPool() {
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
         .queueFamilyIndex = queue_family_indices.graphicsFamily};
 
-    if (vkCreateCommandPool(g_device, &create_info, NULL, &g_command_pool) != VK_SUCCESS) PANIC("Failed to create command pool!");
+    if(vkCreateCommandPool(g_device, &create_info, NULL, &g_command_pool) != VK_SUCCESS) PANIC("Failed to create command pool!");
 }
 
 uint32_t findMemoryType(const uint32_t typeFilter, VkMemoryPropertyFlags properties) {
@@ -1198,7 +1223,7 @@ uint32_t findMemoryType(const uint32_t typeFilter, VkMemoryPropertyFlags propert
     vkGetPhysicalDeviceMemoryProperties(g_physical_device, &memProperties);
 
     for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+        if((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
             return i;
         }
     }
@@ -1231,7 +1256,7 @@ void createImage(
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
     };
 
-    if (vkCreateImage(g_device, &imageInfo, NULL, image) != VK_SUCCESS)
+    if(vkCreateImage(g_device, &imageInfo, NULL, image) != VK_SUCCESS)
         PANIC("failed to create image!");
 
     VkMemoryRequirements memRequirements;
@@ -1242,7 +1267,7 @@ void createImage(
     allocInfo.allocationSize = memRequirements.size;
     allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
 
-    if (vkAllocateMemory(g_device, &allocInfo, NULL, imageMemory) != VK_SUCCESS)
+    if(vkAllocateMemory(g_device, &allocInfo, NULL, imageMemory) != VK_SUCCESS)
         PANIC("failed to allocate image memory!");
 
     vkBindImageMemory(g_device, *image, *imageMemory, 0);
@@ -1293,8 +1318,361 @@ void createFramebuffers() {
             .width = g_swap_chain_extent.width,
             .height = g_swap_chain_extent.height,
             .layers = 1};
-        if (vkCreateFramebuffer(g_device, &framebufferInfo, NULL, &g_swap_chain_framebuffers[i]) != VK_SUCCESS) PANIC("failed to create framebuffer!");
+        if(vkCreateFramebuffer(g_device, &framebufferInfo, NULL, &g_swap_chain_framebuffers[i]) != VK_SUCCESS) PANIC("failed to create framebuffer!");
     }
+}
+
+uint32_t calculate_mip_levels(const uint32_t width, const uint32_t height) {
+    uint32_t max_dim = MAX(width, height);
+    uint32_t mip_levels = 0;
+    while (max_dim > 0) {
+        mip_levels++;
+        max_dim /= 2;
+    }
+    return mip_levels;
+}
+
+VkCommandBuffer beginSingleTimeCommands() {
+    VkCommandBufferAllocateInfo allocInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = g_command_pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(g_device, &allocInfo, &commandBuffer);
+
+    VkCommandBufferBeginInfo beginInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+
+    vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+    return commandBuffer;
+}
+
+void endSingleTimeCommands(VkCommandBuffer commandBuffer) {
+    vkEndCommandBuffer(commandBuffer);
+
+    VkSubmitInfo submitInfo = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &commandBuffer};
+
+    vkQueueSubmit(g_graphics_queue, 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(g_graphics_queue);
+
+    vkFreeCommandBuffers(g_device, g_command_pool, 1, &commandBuffer);
+}
+
+void createBuffer(
+    const VkDeviceSize size,
+    const VkBufferUsageFlags usage,
+    const VkMemoryPropertyFlags properties,
+    VkBuffer *buffer,
+    VkDeviceMemory *bufferMemory)
+{
+    const VkBufferCreateInfo bufferInfo = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = size,
+        .usage = usage,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+
+    if(vkCreateBuffer(g_device, &bufferInfo, NULL, buffer) != VK_SUCCESS) PANIC("failed to create buffer!");
+
+    VkMemoryRequirements memRequirements;
+    vkGetBufferMemoryRequirements(g_device, *buffer, &memRequirements);
+
+    const VkMemoryAllocateInfo allocInfo = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = memRequirements.size,
+        .memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties)};
+
+    if(vkAllocateMemory(g_device, &allocInfo, NULL, bufferMemory) != VK_SUCCESS) PANIC("failed to allocate buffer memory!");
+    vkBindBufferMemory(g_device, *buffer, *bufferMemory, 0);
+}
+
+void copyBufferToImage(VkBuffer buffer, VkImage image, const uint32_t width, const uint32_t height) {
+    VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+
+    const VkBufferImageCopy region = {
+        .bufferOffset = 0,
+        .bufferRowLength = 0,
+        .bufferImageHeight = 0,
+        .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+        .imageOffset = {.x = 0, .y = 0, .z = 0},
+        .imageExtent = {.width = width, .height = height, .depth = 1}};
+
+    vkCmdCopyBufferToImage(
+        commandBuffer,
+        buffer,
+        image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
+        &region);
+
+    endSingleTimeCommands(commandBuffer);
+}
+
+
+void transitionImageLayout(
+    VkImage image,
+    VkFormat format,
+    VkImageLayout oldLayout,
+    VkImageLayout newLayout,
+    const uint32_t mipLevels)
+{
+    (void)format; // Suppresses compiler warnings
+    VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+    VkImageMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = 0,
+        .dstAccessMask = 0,
+        .oldLayout = oldLayout,
+        .newLayout = newLayout,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = mipLevels,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+
+    VkPipelineStageFlags sourceStage = 0;
+    VkPipelineStageFlags destinationStage = 0;
+    if(oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        // Transition from an undefined layout to a layout that allows for writing by transfer operations
+        barrier.srcAccessMask = 0;                            // No need to wait for anything
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; // The image will be written to
+
+        sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+
+    } else if(oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        // Transition from a transfer destination layout to a shader-readable layout
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; // Must wait for the transfer to complete
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;    // The image will be read by the shader
+
+        sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+
+    } else if(oldLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR) {
+        // Transition from transfer source to presentation layout
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT; // Must wait for transfer reads to complete
+        barrier.dstAccessMask = 0;                           // No need for further synchronization before presenting
+
+        sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        destinationStage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+
+    } else if(oldLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR && newLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+        // Transition from presentation layout to transfer source layout
+        barrier.srcAccessMask = 0;                           // No need to wait for anything before transitioning
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT; // The image will be read as a source for transfer
+
+        sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+
+    } else { PANIC("unsupported layout transition!"); }
+
+    vkCmdPipelineBarrier(
+        commandBuffer,
+        sourceStage, destinationStage,
+        0,
+        0, NULL,
+        0, NULL,
+        1, &barrier);
+
+    endSingleTimeCommands(commandBuffer);
+}
+
+
+void generateMipmaps(
+    VkImage image,
+    VkFormat imageFormat,
+    const int32_t texWidth,
+    const int32_t texHeight,
+    const uint32_t mipLevels)
+{
+    VkFormatProperties formatProperties;
+    vkGetPhysicalDeviceFormatProperties(g_physical_device, imageFormat, &formatProperties);
+
+    if(!(formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) {
+        PANIC("texture image format does not support linear blitting!");
+    }
+
+    VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+    VkImageMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1},
+    };
+
+    int32_t mipWidth = texWidth;
+    int32_t mipHeight = texHeight;
+
+    for (uint32_t i = 1; i < mipLevels; i++) {
+        barrier.subresourceRange.baseMipLevel = i - 1;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+        vkCmdPipelineBarrier(
+            commandBuffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0,
+            0,
+            NULL,
+            0,
+            NULL,
+            1,
+            &barrier);
+
+        VkImageBlit blit = {
+            .srcSubresource = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .mipLevel = i - 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1
+            },
+            .srcOffsets = {
+                { .x = 0, .y = 0, .z = 0 },
+                { .x = mipWidth, .y = mipHeight, .z = 1 }
+            },
+            .dstSubresource = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .mipLevel = i,
+                .baseArrayLayer = 0,
+                .layerCount = 1
+            },
+            .dstOffsets = {
+                { .x = 0, .y = 0, .z = 0 },
+                { .x = (mipWidth > 1 ? mipWidth / 2 : 1), .y = (mipHeight > 1 ? mipHeight / 2 : 1), .z = 1 }
+            }
+        };
+
+        vkCmdBlitImage(
+            commandBuffer,
+            image,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1,
+            &blit,
+            VK_FILTER_LINEAR);
+
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        vkCmdPipelineBarrier(
+            commandBuffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0,
+            0,
+            NULL,
+            0,
+            NULL,
+            1,
+            &barrier);
+
+        if(mipWidth > 1) mipWidth /= 2;
+        if(mipHeight > 1) mipHeight /= 2;
+    }
+
+    // Need to specifically handle the last mipMap, as the don't blit from it that is not handled in the loop
+    barrier.subresourceRange.baseMipLevel = mipLevels - 1;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    vkCmdPipelineBarrier(
+        commandBuffer,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0,
+        0,
+        NULL,
+        0,
+        NULL,
+        1,
+        &barrier);
+
+    endSingleTimeCommands(commandBuffer);
+}
+
+void createTextureImage() {
+    const char* texture_fp = "./assets/textures/painted_plaster_diffuse.png";
+    if(!file_exists(texture_fp)) PANIC("Texture file not found at '%s'", texture_fp);
+
+    int texWidth = 0;
+    int texHeight = 0;
+    int texChannels = 0;
+    stbi_uc *pixels = stbi_load(texture_fp, &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+    if(!pixels) PANIC("Failed to load texture image!");
+    VkDeviceSize imageSize = texWidth * texHeight * 4;
+
+    // m_MipLevels = How often we can divide max(width, height) by 2, could also take the ceil here instead of floor + 1
+    g_mip_levels = calculate_mip_levels(texWidth, texHeight);
+
+    VkBuffer stagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory stagingBufferMemory = VK_NULL_HANDLE;
+    createBuffer(
+        imageSize,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        &stagingBuffer,
+        &stagingBufferMemory);
+
+    void *data = NULL;
+    vkMapMemory(g_device, stagingBufferMemory, 0, imageSize, 0, &data);
+    memcpy(data, pixels, imageSize);
+
+    vkUnmapMemory(g_device, stagingBufferMemory);
+    stbi_image_free(pixels);
+
+    createImage(
+        texWidth,
+        texHeight,
+        g_mip_levels,
+        VK_SAMPLE_COUNT_1_BIT,
+        VK_FORMAT_R8G8B8A8_SRGB,
+        VK_IMAGE_TILING_OPTIMAL,
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        &g_texture_image,
+        &g_texture_image_memory);
+    transitionImageLayout(
+        g_texture_image,
+        VK_FORMAT_R8G8B8A8_SRGB,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        g_mip_levels);
+    copyBufferToImage(
+        stagingBuffer,
+        g_texture_image,
+        texWidth,
+        texHeight);
+
+    vkDestroyBuffer(g_device, stagingBuffer, NULL);
+    vkFreeMemory(g_device, stagingBufferMemory, NULL);
+
+    generateMipmaps(g_texture_image, VK_FORMAT_R8G8B8A8_SRGB, texWidth, texHeight, g_mip_levels);
 }
 
 int main() {
@@ -1334,6 +1712,9 @@ int main() {
     printf("Creating Framebuffers.\n");
     createFramebuffers();
 
+    printf("Creating Texture image.\n");
+    createTextureImage();
+
     SDL_Event e;
     g_is_running = true;
     while (g_is_running){
@@ -1345,6 +1726,12 @@ int main() {
     /*
      * CLEANUP Code
      */
+    if(g_texture_sampler != VK_NULL_HANDLE) { vkDestroySampler(g_device, g_texture_sampler, NULL); g_texture_sampler = VK_NULL_HANDLE; }
+    if(g_texture_image_view != VK_NULL_HANDLE) { vkDestroyImageView(g_device, g_texture_image_view, NULL); g_texture_image_view = VK_NULL_HANDLE; }
+
+    vkFreeMemory(g_device, g_texture_image_memory, NULL); g_texture_image_memory = VK_NULL_HANDLE;
+    vkDestroyImage(g_device, g_texture_image, NULL); g_texture_image = VK_NULL_HANDLE;
+
     vkDestroyCommandPool        (g_device, g_command_pool          , NULL); g_command_pool          = VK_NULL_HANDLE;
     vkDestroyPipeline           (g_device, g_graphics_pipeline     , NULL); g_graphics_pipeline     = VK_NULL_HANDLE;
     vkDestroyPipelineLayout     (g_device, g_pipeline_layout       , NULL); g_pipeline_layout       = VK_NULL_HANDLE;
@@ -1373,14 +1760,14 @@ int main() {
     const PFN_vkDestroyDebugUtilsMessengerEXT func = (PFN_vkDestroyDebugUtilsMessengerEXT)
         (vkGetInstanceProcAddr(g_instance, "vkDestroyDebugUtilsMessengerEXT"));
 
-    if (func != NULL) {
+    if(func != NULL) {
         func(g_instance, g_debug_messenger, NULL);
         g_debug_messenger = VK_NULL_HANDLE;
     }
 
     vkDestroyInstance(g_instance, NULL); g_instance = VK_NULL_HANDLE;
 
-    if (g_window) {
+    if(g_window) {
         SDL_DestroyWindow(g_window);
         g_window = NULL;
     }
