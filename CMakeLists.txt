@@ -36,6 +36,10 @@ include_directories(${SDL2_INCLUDE_DIRS})  # Include SDL2 headers
 add_library(cjson STATIC external/cjson/cJSON.c)  # Add the cJSON library
 include_directories(external/cjson)  # Include cJSON headers
 
+# Include CGLM
+include_directories(/opt/homebrew/opt/cglm/include)
+link_directories(/opt/homebrew/opt/cglm/lib)
+
 # Create the VulkanEngine executable
 add_executable(VulkanEngine ${SOURCES}
         src/main.c)

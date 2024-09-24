@@ -10,6 +10,18 @@
 #include <stdlib.h>
 #include <stdbool.h>
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <arm/limits.h>
+#include <sys/stat.h>
+
+#include <cglm/cglm.h>
+
+#define TINYOBJLOADER_IMPLEMENTATION
+#include <tinyobj_loader_c.h>
+
 #define DEFAULT_WINDOW_WIDTH 800
 #define DEFAULT_WINDOW_HEIGHT 600
 #define PROJECT_NAME "Vulkan Engine"
@@ -69,6 +81,81 @@
         }
 #endif // not NDEBUG
 
+// Function to check if the file is a regular file using stat
+int is_regular_file(const char *filename) {
+    struct stat fileStat;
+    if (stat(filename, &fileStat) != 0) return 0; // File does not exist or is in a error state
+    return S_ISREG(fileStat.st_mode); // Check if it's a regular file
+}
+
+//@DS:NEEDS_FREE_AFTER_USE
+char *readFile(const char *filename, size_t *out_size) {
+    // First check if the file exists and is a regular file
+    if (!is_regular_file(filename)) {
+        fprintf(stderr, "Error: '%s' is not a regular file or does not exist.\n", filename);
+        return NULL;
+    }
+
+    FILE *file = fopen(filename, "rb");
+    if (!file) {
+        fprintf(stderr, "Error: Unable to open file '%s': %s\n", filename, strerror(errno));
+        return NULL;
+    }
+
+    // Seek to the end to determine the file size
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fprintf(stderr, "Error: Unable to seek to the end of file '%s'\n", filename);
+        fclose(file);
+        return NULL;
+    }
+
+    const long fileSize = ftell(file);
+    if (fileSize == -1L) {
+        fprintf(stderr, "Error: Unable to get file size of '%s'\n", filename);
+        fclose(file);
+        return NULL;
+    }
+
+    if (fileSize > LONG_MAX) { // TODO: Check this, I think the cast breaks something
+        fprintf(stderr, "Error: File size exceeds maximum supported size.\n");
+        fclose(file);
+        return NULL;
+    }
+
+    *out_size = (size_t)fileSize;
+
+    // Go back to the beginning of the file
+    rewind(file);
+
+    // Allocate buffer for the file content
+    char *buffer = malloc(*out_size);
+    if (!buffer) {
+        fprintf(stderr, "Error: Memory allocation failed for file '%s'\n", filename);
+        fclose(file);
+        return NULL;
+    }
+
+    // Read the file into the buffer
+    const size_t bytesRead = fread(buffer, 1, *out_size, file);
+    if (bytesRead != *out_size) {
+        fprintf(stderr, "Error: Unable to read entire file '%s'\n", filename);
+        free(buffer);
+        fclose(file);
+        return NULL;
+    }
+
+    fclose(file);
+    return buffer;
+}
+
+struct PushConstants {
+    vec3 cameraEye    __attribute__((aligned(16)));
+    vec3 cameraCenter __attribute__((aligned(16)));
+    vec3 cameraUp     __attribute__((aligned(16)));
+    float time;
+    int stage;
+};
+
 
 SDL_Window* g_window;
 
@@ -85,6 +172,11 @@ VkExtent2D g_swap_chain_extent;
 
 VkRenderPass g_render_pass;
 
+VkPipeline g_graphics_pipeline;
+VkPipelineLayout g_pipeline_layout;
+
+VkDescriptorSetLayout g_descriptor_set_layout;
+
 VkSampleCountFlagBits g_MSAASamples;
 
 VkQueue g_graphics_queue = VK_NULL_HANDLE;
@@ -92,16 +184,21 @@ VkQueue g_presentation_queue = VK_NULL_HANDLE;
 
 VkDebugUtilsMessengerEXT g_debug_messenger;
 
+
 bool g_is_running = true;
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
-    VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
-    VkDebugUtilsMessageTypeFlagsEXT messageType,
+    const VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+    const VkDebugUtilsMessageTypeFlagsEXT messageType,
     const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData,
-    void *pUserData
+    const void *pUserData
 ) {
-    (void)messageSeverity; (void)messageType; (void)pUserData; // Suppressed "Unused Parameter" warning
-    fprintf(stderr, "validation layer: %s\n", pCallbackData->pMessage);
+    (void)messageType; (void)pUserData; // Suppressed "Unused Parameter" warning
+    if(messageSeverity == VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) printf("Validation Layer [INFO]: %s\n", pCallbackData->pMessage);
+    else if(messageSeverity == VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) fprintf(stderr, "Validation Layer [ERROR]: %s\n", pCallbackData->pMessage);
+    else if(messageSeverity == VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) printf("Validation Layer [WARNING]: %s\n", pCallbackData->pMessage);
+    else if(messageSeverity == VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) printf("Validation Layer [VERBOSE]: %s\n", pCallbackData->pMessage);
+    else PANIC("Unknown messageSeverity!");
     return VK_FALSE;
 }
 
@@ -795,6 +892,226 @@ void createRenderPass() {
     if (vkCreateRenderPass(g_device, &renderPassInfo, NULL, &g_render_pass) != VK_SUCCESS) PANIC("failed to create render pass!");
 }
 
+void createDescriptorSetLayout() {
+    VkDescriptorSetLayoutBinding uboLayoutBinding = {
+        .binding = 0,
+        .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT};
+
+    VkDescriptorSetLayoutBinding samplerLayoutBinding = {
+        .binding = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .pImmutableSamplers = NULL};
+
+    const VkDescriptorSetLayoutCreateInfo layoutInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 2,
+        .pBindings = (VkDescriptorSetLayoutBinding[]){uboLayoutBinding, samplerLayoutBinding}};
+
+    if (vkCreateDescriptorSetLayout(g_device, &layoutInfo, NULL, &g_descriptor_set_layout) != VK_SUCCESS) PANIC("failed to create descriptor set layout!");
+}
+
+VkShaderModule createShaderModule(const char* code, size_t code_length) {
+    const VkShaderModuleCreateInfo createInfo = {
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = (uint32_t)code_length,
+        .pCode = (const uint32_t *)code
+    };
+    VkShaderModule shaderModule = VK_NULL_HANDLE;
+    if (vkCreateShaderModule(g_device, &createInfo, NULL, &shaderModule) != VK_SUCCESS) PANIC("Failed to create shader!");
+    return shaderModule;
+}
+
+struct Vertex {
+    vec3 pos;
+    vec3 normal;
+    vec2 texCoord;
+};
+
+VkVertexInputBindingDescription getVertexBindingDescription() {
+    const VkVertexInputBindingDescription bindingDescription = {
+        .binding = 0,
+        .stride = sizeof(struct Vertex),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
+    };
+    return bindingDescription;
+}
+
+VkVertexInputAttributeDescription* getVertexAttributeDescription(uint32_t* num_attribute_descriptions) {
+    *num_attribute_descriptions = 3;
+    static VkVertexInputAttributeDescription attributes[3];
+    attributes[0] = (VkVertexInputAttributeDescription){
+        .binding = 0,
+        .location = 0,
+        .format = VK_FORMAT_R32G32B32_SFLOAT,
+        .offset = offsetof(struct Vertex, pos)};
+    attributes[1] = (VkVertexInputAttributeDescription){
+        .binding = 0,
+        .location = 1,
+        .format = VK_FORMAT_R32G32B32_SFLOAT,
+        .offset = offsetof(struct Vertex, normal)};
+    attributes[2] = (VkVertexInputAttributeDescription){
+        .binding = 0,
+        .location = 2,
+        .format = VK_FORMAT_R32G32_SFLOAT,
+        .offset = offsetof(struct Vertex, texCoord)};
+    return attributes;
+}
+
+void createGraphicsPipeline() {
+    fprintf(stdout, "Trying to create Shader modules.\n");
+    fprintf(stdout, "Trying to read .spv files.\n");
+    size_t vertShaderCode_length; size_t fragShaderCode_length;
+    // ReSharper disable once CppDFAMemoryLeak
+    const char* vertShaderCode = readFile("shaders/compiled/shader_phong_stages.vert.spv", &vertShaderCode_length);
+    if (!vertShaderCode) PANIC("Could not read vertex shader file.");
+    // ReSharper disable once CppDFAMemoryLeak
+    const char* fragShaderCode = readFile("shaders/compiled/shader_phong_stages.frag.spv", &fragShaderCode_length);
+    if (!fragShaderCode) PANIC("Could not read fragment shader file.");
+
+    fprintf(stdout, "\tTrying to create Vertex Shader.\n");
+    VkShaderModule vertShaderModule = createShaderModule(vertShaderCode, vertShaderCode_length);
+    VkPipelineShaderStageCreateInfo vertShaderStageInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_VERTEX_BIT,
+        .module = vertShaderModule,
+        .pName = "main"};
+
+    fprintf(stdout, "\tTrying to create Fragment Shader.\n");
+    VkShaderModule fragShaderModule = createShaderModule(fragShaderCode, fragShaderCode_length);
+    VkPipelineShaderStageCreateInfo fragShaderStageInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .module = fragShaderModule,
+        .pName = "main"};
+
+    free((char *)vertShaderCode); vertShaderCode = NULL; free((char *)fragShaderCode); fragShaderCode = NULL;
+    vertShaderCode_length = UINT32_INVALIDED_VALUE; fragShaderCode_length = UINT32_INVALIDED_VALUE;
+    fprintf(stdout, "Successfully created the shader modules.\n");
+
+
+    fprintf(stdout, "Trying to Initialize Fixed Functions.\n");
+    fprintf(stdout, "\tInitializing Vertex Input.\n");
+    VkVertexInputBindingDescription bindingDescription = getVertexBindingDescription();
+    uint32_t num_attribute_descriptions;
+    VkVertexInputAttributeDescription* attribute_descriptions = getVertexAttributeDescription(&num_attribute_descriptions);
+
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &bindingDescription,
+        .vertexAttributeDescriptionCount = num_attribute_descriptions,
+        .pVertexAttributeDescriptions = attribute_descriptions};
+
+    fprintf(stdout, "\tInitializing Input Assembly.\n");
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = VK_FALSE};
+
+    VkDynamicState dynamicStates[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+
+    VkPipelineDynamicStateCreateInfo dynamicState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = 2,
+        .pDynamicStates = dynamicStates};
+
+    VkPipelineViewportStateCreateInfo viewportState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .scissorCount = 1};
+
+    fprintf(stdout, "\tInitializing Rasterizer.\n");
+    VkPipelineRasterizationStateCreateInfo rasterizer = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .depthClampEnable = VK_FALSE,
+        .rasterizerDiscardEnable = VK_FALSE,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_BACK_BIT,
+        .frontFace = VK_FRONT_FACE_CLOCKWISE,
+        .depthBiasEnable = VK_FALSE,
+        .depthBiasConstantFactor = 0.0f,
+        .depthBiasClamp = 0.0f,
+        .depthBiasSlopeFactor = 0.0f,
+        .lineWidth = 1.0f};
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_TRUE,
+        .depthCompareOp = VK_COMPARE_OP_LESS,
+        .depthBoundsTestEnable = VK_FALSE,
+        .stencilTestEnable = VK_FALSE};
+
+    fprintf(stdout, "\tInitializing Multisampling.\n");
+    VkPipelineMultisampleStateCreateInfo multisampling = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = g_MSAASamples,
+        .sampleShadingEnable = VK_FALSE};
+
+    fprintf(stdout, "\tInitializing Color Blending.\n");
+    VkPipelineColorBlendAttachmentState colorBlendAttachment = {
+        .blendEnable = VK_FALSE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+
+    VkPipelineColorBlendStateCreateInfo colorBlending = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .logicOpEnable = VK_FALSE,
+        .logicOp = VK_LOGIC_OP_COPY,
+        .attachmentCount = 1,
+        .pAttachments = &colorBlendAttachment,
+        .blendConstants = {0.0F, 0.0F, 0.0F, 0.0F}};
+
+    // Define the push constant range
+    VkPushConstantRange pushConstantRange = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset = 0,
+        .size = sizeof(struct PushConstants)};
+
+    fprintf(stdout, "\tInitializing Render Pipeline.\n");
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1,
+        .pSetLayouts = &g_descriptor_set_layout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &pushConstantRange};
+
+    if (vkCreatePipelineLayout(g_device, &pipelineLayoutInfo, NULL, &g_pipeline_layout) != VK_SUCCESS) PANIC("failed to create pipeline layout!");
+
+    VkGraphicsPipelineCreateInfo pipelineInfo = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = 2,
+        .pStages = (VkPipelineShaderStageCreateInfo[]) {vertShaderStageInfo, fragShaderStageInfo},
+        .pVertexInputState = &vertexInputInfo,
+        .pInputAssemblyState = &inputAssembly,
+        .pViewportState = &viewportState,
+        .pRasterizationState = &rasterizer,
+        .pMultisampleState = &multisampling,
+        .pDepthStencilState = &depthStencil,
+        .pColorBlendState = &colorBlending,
+        .pDynamicState = &dynamicState,
+        .layout = g_pipeline_layout,
+        .renderPass = g_render_pass,
+        .subpass = 0,
+        .basePipelineHandle = VK_NULL_HANDLE};
+
+    if (vkCreateGraphicsPipelines(g_device, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, &g_graphics_pipeline) != VK_SUCCESS) PANIC("failed to create graphics pipeline!");
+
+    fprintf(stdout, "Cleaning up shader modules.\n");
+    vkDestroyShaderModule(g_device, fragShaderModule, NULL);
+    vkDestroyShaderModule(g_device, vertShaderModule, NULL);
+}
+
 int main() {
     printf("Initializing window.\n");
     initWindow();
@@ -816,6 +1133,12 @@ int main() {
     printf("Creating Render Pass.\n");
     createRenderPass();
 
+    printf("Creating descriptor set layout.\n");
+    createDescriptorSetLayout();
+
+    printf("Creating Graphics Pipeline.\n");
+    createGraphicsPipeline();
+
     SDL_Event e;
     while (g_is_running){
         while (SDL_PollEvent(&e)){
@@ -823,21 +1146,26 @@ int main() {
         }
     }
 
-    vkDestroyRenderPass(g_device, g_render_pass, NULL);
+    vkDestroyPipeline(g_device, g_graphics_pipeline, NULL); g_graphics_pipeline = VK_NULL_HANDLE;
+    vkDestroyPipelineLayout(g_device, g_pipeline_layout, NULL); g_pipeline_layout = VK_NULL_HANDLE;
+
+    vkDestroyDescriptorSetLayout(g_device, g_descriptor_set_layout, NULL); g_descriptor_set_layout = VK_NULL_HANDLE;
+
+    vkDestroyRenderPass(g_device, g_render_pass, NULL); g_render_pass = VK_NULL_HANDLE;
     for (size_t i = 0; i < g_num_swap_chain_images; i++) {
         vkDestroyImageView(g_device, g_swap_chain_image_views[i], NULL);
     }
     free(g_swap_chain_image_views);
     free(g_swap_chain_images);
-    vkDestroySwapchainKHR(g_device, g_swap_chain, NULL);
-    vkDestroyDevice(g_device, NULL);
-    vkDestroySurfaceKHR(g_instance, g_surface, NULL);
+    vkDestroySwapchainKHR(g_device, g_swap_chain, NULL); g_swap_chain = VK_NULL_HANDLE;
+    vkDestroyDevice(g_device, NULL); g_device = VK_NULL_HANDLE;
+    vkDestroySurfaceKHR(g_instance, g_surface, NULL); g_surface = VK_NULL_HANDLE;
     const PFN_vkDestroyDebugUtilsMessengerEXT func = (PFN_vkDestroyDebugUtilsMessengerEXT)(vkGetInstanceProcAddr(g_instance, "vkDestroyDebugUtilsMessengerEXT"));
     if(func != NULL) func(g_instance, g_debug_messenger, NULL);
     g_debug_messenger = NULL;
-    vkDestroyInstance(g_instance, NULL);
+    vkDestroyInstance(g_instance, NULL); g_instance = VK_NULL_HANDLE;
 
-    if(g_window) SDL_DestroyWindow(g_window);
+    if(g_window) SDL_DestroyWindow(g_window); g_window = NULL;
     SDL_Quit();
 
     return EXIT_SUCCESS;
