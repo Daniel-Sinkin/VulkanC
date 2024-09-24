@@ -1743,6 +1743,10 @@ int main() {
 
     printf("Creating Texture image.\n");
     createTextureImage();
+    printf("Creating Texture image View.\n");
+    createTextureImageView();
+    printf("Creating Texture Sampler\n");
+    createTextureSampler();
 
     SDL_Event e;
     g_is_running = true;
@@ -1800,6 +1804,8 @@ int main() {
         g_window = NULL;
     }
     SDL_Quit();
+    printf("Shut down SDL.\n");
 
+    printf("Program finished running, Goodbye!");
     return EXIT_SUCCESS;
 }
