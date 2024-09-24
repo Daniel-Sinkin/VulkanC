@@ -15,8 +15,14 @@
 #define PROJECT_NAME "Vulkan Engine"
 
 #define ENABLE_VALIDATION_LAYERS true
+#define ALLOW_DEVICE_WITHOUT_INTEGRATED_GPU true
+#define ALLOW_DEVICE_WITHOUT_GEOMETRY_SHADER true
+
+#define QUEUE_FAMILY_UNINITIALIZED UINT32_MAX
 
 #define REQUIRED_VULKAN_API_VERSION VK_API_VERSION_1_3
+
+#define REQUIRED_DEVICE_EXTENSIONS {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME}
 
 
 // PANIC macro to print error details (with file, line, and function info) and abort
@@ -44,6 +50,7 @@
     #define realloc(ptr, size) debug_realloc(ptr, size)
 
     void* debug_malloc(const size_t size) {
+        printf("malloc(size=%zu)\n", size);
         #undef malloc
         void* ptr = malloc(size);  // Call the real malloc
         #define malloc(size) debug_malloc(size)
@@ -55,7 +62,7 @@
     #undef realloc
             void* new_ptr = realloc(ptr, size);  // Call the real realloc
     #define realloc(ptr, size) debug_realloc(ptr, size)
-            if (new_ptr == NULL) PANIC("Failed to reallocate %zu bytes.", size);
+            if(new_ptr == NULL) PANIC("Failed to reallocate %zu bytes.", size);
             return new_ptr;
         }
 #endif // not NDEBUG
@@ -65,6 +72,8 @@ SDL_Window* g_window;
 VkInstance g_instance;
 
 VkSurfaceKHR g_surface;
+
+VkPhysicalDevice g_physical_device = VK_NULL_HANDLE;
 
 VkDebugUtilsMessengerEXT g_debug_messenger;
 
@@ -273,15 +282,109 @@ void initInstance() {
     }
 }
 
-void pickPhysicalDevice() {
-    uint32_t n_physical_devices = 0;
-    vkEnumeratePhysicalDevices(g_instance, &n_physical_devices, NULL);
-    if(n_physical_devices == 0) PANIC("No physical devices found!");
-    VkPhysicalDevice* physical_devices = malloc(n_physical_devices * sizeof(VkPhysicalDevice));
-    vkEnumeratePhysicalDevices(g_instance, &n_physical_devices, physical_devices);
+typedef struct {
+    uint32_t graphicsFamily;
+    uint32_t presentationFamily;
+} QueueFamilyIndices;
 
-    free(physical_devices);
+bool QueueFamilyIndices_isComplete(const QueueFamilyIndices* pQFI) {
+    return (pQFI->graphicsFamily != 0) && (pQFI->presentationFamily != 0);
 }
+
+// Returns QFI of a suitable queue, if none is suitable then this panics.
+QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device) {
+    QueueFamilyIndices indices = {
+        .graphicsFamily = QUEUE_FAMILY_UNINITIALIZED,
+        .presentationFamily = QUEUE_FAMILY_UNINITIALIZED};
+
+    uint32_t num_queue_families = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &num_queue_families, NULL);
+
+    VkQueueFamilyProperties* queueFamilies = malloc(num_queue_families * sizeof(VkQueueFamilyProperties));
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &num_queue_families, queueFamilies);
+
+    for(int i = 0; i < num_queue_families; i++) {
+        if(queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+            indices.graphicsFamily = i;
+        }
+
+        VkBool32 presentSupport = false;
+        vkGetPhysicalDeviceSurfaceSupportKHR(device, i, g_surface, &presentSupport);
+        if(presentSupport) indices.presentationFamily = i;
+
+        if(QueueFamilyIndices_isComplete(&indices)) break;
+    }
+    if(!QueueFamilyIndices_isComplete(&indices)) PANIC("Couldn't find suitable queue family!");
+
+    free(queueFamilies);
+    return indices;
+}
+
+bool isDeviceSuitable(VkPhysicalDevice device) {
+    VkPhysicalDeviceProperties deviceProperties;
+    VkPhysicalDeviceFeatures deviceFeatures;
+    vkGetPhysicalDeviceProperties(device, &deviceProperties);
+    vkGetPhysicalDeviceFeatures(device, &deviceFeatures);
+
+    if(!ALLOW_DEVICE_WITHOUT_INTEGRATED_GPU && deviceProperties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+        printf("Device is unsuitable bcause it's an integrated GPU.");
+        return false;
+    }
+
+    if(!ALLOW_DEVICE_WITHOUT_GEOMETRY_SHADER && !deviceFeatures.geometryShader) {
+        printf("Device is unsuitable because it does not support Geometry Shaders.\n");
+        return false;
+    }
+
+    (void)findQueueFamilies(device); // Check if this device has suitable queue families..
+    printf("Device supports suitable queue families.\n");
+
+    uint32_t num_available_extensions = 0;
+    vkEnumerateDeviceExtensionProperties(device, NULL, &num_available_extensions, NULL);
+    VkExtensionProperties* available_extensions = malloc(num_available_extensions * sizeof(VkExtensionProperties));
+    vkEnumerateDeviceExtensionProperties(device, NULL, &num_available_extensions, available_extensions);
+
+    const char* required_extensions[] = REQUIRED_DEVICE_EXTENSIONS;
+    size_t num_required_extensions = sizeof(required_extensions) / sizeof(required_extensions[0]);
+    for(size_t i = 0; i < num_required_extensions; i++) {
+        bool found = true;
+        for(size_t j = 0; j < num_available_extensions; j++) {
+            if(strcmp(available_extensions[j].extensionName, required_extensions[i]) == 0) {
+                found = true;
+                break;
+            }
+        }
+        if(!found) PANIC("Required extension not found: %s", required_extensions[i]);
+    }
+    free(available_extensions);
+    printf("Device supports the necessary extensions.\n");
+
+    /* TODO: Implement the querySwapChainSupport functionality. */
+
+    VkPhysicalDeviceFeatures supported_features;
+    vkGetPhysicalDeviceFeatures(device, &supported_features);
+    if(!supported_features.samplerAnisotropy) PANIC("Device does not support samplerAnisotropy.");
+    return true;
+}
+
+void pickPhysicalDevice() {
+    uint32_t num_physical_devices = 0;
+    vkEnumeratePhysicalDevices(g_instance, &num_physical_devices, NULL);
+    if(num_physical_devices == 0) PANIC("No physical devices found!");
+    VkPhysicalDevice* physical_devices = malloc(num_physical_devices * sizeof(VkPhysicalDevice));
+    vkEnumeratePhysicalDevices(g_instance, &num_physical_devices, physical_devices);
+
+    for(size_t i = 0; i < num_physical_devices; i++) {
+        VkPhysicalDevice current_device = physical_devices[i];
+        if(isDeviceSuitable(current_device)) {
+            g_physical_device = current_device;
+            break;
+        }
+    }
+    free(physical_devices);
+    if(g_physical_device == VK_NULL_HANDLE) PANIC("No suitable physical device available!");
+}
+
 
 int main() {
     initWindow();
@@ -290,6 +393,7 @@ int main() {
     if(!SDL_Vulkan_CreateSurface(g_window, g_instance, &g_surface)) PANIC("Failed to bind SDL window to VkSurface.");
 
     pickPhysicalDevice();
+
 
     SDL_Event e;
     while (g_is_running){
