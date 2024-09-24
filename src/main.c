@@ -30,7 +30,7 @@
 #define ALLOW_DEVICE_WITHOUT_INTEGRATED_GPU true
 #define ALLOW_DEVICE_WITHOUT_GEOMETRY_SHADER true
 
-#define UINT32_UNITIALIZED_VALUE UINT32_MAX
+#define UINT32_UNINITIALIZED_VALUE UINT32_MAX
 #define UINT32_INVALIDED_VALUE 0xDEADBEEF
 
 #define REQUIRED_VULKAN_API_VERSION VK_API_VERSION_1_3
@@ -165,17 +165,18 @@ VkPhysicalDevice g_physical_device = VK_NULL_HANDLE;
 VkDevice g_device = VK_NULL_HANDLE;
 VkSwapchainKHR g_swap_chain = VK_NULL_HANDLE;
 VkImage* g_swap_chain_images = NULL;
-uint32_t g_num_swap_chain_images = 0;
+uint32_t g_num_swap_chain_images = UINT32_UNINITIALIZED_VALUE;
 VkFormat g_swap_chain_image_format = VK_NULL_HANDLE;
 VkImageView* g_swap_chain_image_views = VK_NULL_HANDLE;
-VkExtent2D g_swap_chain_extent;
+VkExtent2D g_swap_chain_extent = {.width = UINT32_UNINITIALIZED_VALUE, .height = UINT32_UNINITIALIZED_VALUE};
 
-VkRenderPass g_render_pass;
+VkDescriptorSetLayout g_descriptor_set_layout = VK_NULL_HANDLE;
+VkRenderPass g_render_pass = VK_NULL_HANDLE;
 
-VkPipeline g_graphics_pipeline;
-VkPipelineLayout g_pipeline_layout;
+VkPipeline g_graphics_pipeline = VK_NULL_HANDLE;
+VkPipelineLayout g_pipeline_layout = VK_NULL_HANDLE;
 
-VkDescriptorSetLayout g_descriptor_set_layout;
+VkCommandPool g_command_pool = VK_NULL_HANDLE;
 
 VkSampleCountFlagBits g_MSAASamples;
 
@@ -184,14 +185,13 @@ VkQueue g_presentation_queue = VK_NULL_HANDLE;
 
 VkDebugUtilsMessengerEXT g_debug_messenger;
 
-
-bool g_is_running = true;
+bool g_is_running = false;
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
-    const VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
-    const VkDebugUtilsMessageTypeFlagsEXT messageType,
+    VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+    VkDebugUtilsMessageTypeFlagsEXT messageType,
     const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData,
-    const void *pUserData
+    void *pUserData
 ) {
     (void)messageType; (void)pUserData; // Suppressed "Unused Parameter" warning
     if(messageSeverity == VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) printf("Validation Layer [INFO]: %s\n", pCallbackData->pMessage);
@@ -408,15 +408,15 @@ typedef struct {
 } QueueFamilyIndices;
 
 bool QueueFamilyIndices_isComplete(const QueueFamilyIndices* pQFI) {
-    return (pQFI->graphicsFamily != UINT32_UNITIALIZED_VALUE) && (pQFI->presentationFamily != UINT32_UNITIALIZED_VALUE);
+    return (pQFI->graphicsFamily != UINT32_UNINITIALIZED_VALUE) && (pQFI->presentationFamily != UINT32_UNINITIALIZED_VALUE);
 }
 
 
 // Returns QFI of a suitable queue, if none is suitable then this panics.
 QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device) {
     QueueFamilyIndices indices = {
-        .graphicsFamily = UINT32_UNITIALIZED_VALUE,
-        .presentationFamily = UINT32_UNITIALIZED_VALUE};
+        .graphicsFamily = UINT32_UNINITIALIZED_VALUE,
+        .presentationFamily = UINT32_UNINITIALIZED_VALUE};
 
     uint32_t num_queue_families = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(device, &num_queue_families, NULL);
@@ -680,7 +680,7 @@ VkPresentModeKHR chooseSwapPresentMode(const VkPresentModeKHR* available_present
 }
 
 VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR* capabilities) {
-    const bool isExtentUndefined = capabilities->currentExtent.width == UINT32_UNITIALIZED_VALUE;
+    const bool isExtentUndefined = capabilities->currentExtent.width == UINT32_UNINITIALIZED_VALUE;
     if (!isExtentUndefined) return capabilities->currentExtent;
 
     int width = 0; int height = 0;
@@ -1112,6 +1112,19 @@ void createGraphicsPipeline() {
     vkDestroyShaderModule(g_device, vertShaderModule, NULL);
 }
 
+void createCommandPool() {
+    QueueFamilyIndices queue_family_indices = findQueueFamilies(g_physical_device);
+    if(!QueueFamilyIndices_isComplete(&queue_family_indices)) {
+        PANIC("findQueueFamilies returned incomplete indices!");
+    }
+    const VkCommandPoolCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = queue_family_indices.graphicsFamily};
+
+    if (vkCreateCommandPool(g_device, &create_info, NULL, &g_command_pool) != VK_SUCCESS) PANIC("Failed to create command pool!");
+}
+
 int main() {
     printf("Initializing window.\n");
     initWindow();
@@ -1139,13 +1152,21 @@ int main() {
     printf("Creating Graphics Pipeline.\n");
     createGraphicsPipeline();
 
+    printf("Creating Command Pool.\n");
+    createCommandPool();
+
     SDL_Event e;
+    g_is_running = true;
     while (g_is_running){
         while (SDL_PollEvent(&e)){
             handleInput(e);
         }
     }
 
+    /*
+     * CLEANUP Code
+     */
+    vkDestroyCommandPool(g_device, g_command_pool, NULL);
     vkDestroyPipeline(g_device, g_graphics_pipeline, NULL); g_graphics_pipeline = VK_NULL_HANDLE;
     vkDestroyPipelineLayout(g_device, g_pipeline_layout, NULL); g_pipeline_layout = VK_NULL_HANDLE;
 
