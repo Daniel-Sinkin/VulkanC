@@ -18,12 +18,14 @@
 #define ALLOW_DEVICE_WITHOUT_INTEGRATED_GPU true
 #define ALLOW_DEVICE_WITHOUT_GEOMETRY_SHADER true
 
-#define QUEUE_FAMILY_UNINITIALIZED UINT32_MAX
+#define UINT32_UNITIALIZED_VALUE UINT32_MAX
+#define UINT32_INVALIDED_VALUE 0xDEADBEEF
 
 #define REQUIRED_VULKAN_API_VERSION VK_API_VERSION_1_3
 
 #define REQUIRED_DEVICE_EXTENSIONS {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME}
 
+#define MAX_FRAMES_IN_FLIGHT 2
 
 // PANIC macro to print error details (with file, line, and function info) and abort
 // While not very clean I am explicitly fine with memory leaks when PANIC is called during the initialization
@@ -70,10 +72,14 @@
 
 SDL_Window* g_window;
 
-VkInstance g_instance;
+VkInstance g_instance = VK_NULL_HANDLE;
 VkSurfaceKHR g_surface = VK_NULL_HANDLE;
 VkPhysicalDevice g_physical_device = VK_NULL_HANDLE;
 VkDevice g_device = VK_NULL_HANDLE;
+VkSwapchainKHR g_swap_chain = VK_NULL_HANDLE;
+VkImage* g_swap_chain_images = NULL;
+VkFormat g_swap_chain_image_format = VK_NULL_HANDLE;
+VkExtent2D g_swap_chain_extent;
 
 VkQueue g_graphics_queue = VK_NULL_HANDLE;
 VkQueue g_presentation_queue = VK_NULL_HANDLE;
@@ -133,9 +139,15 @@ void handleInput(const SDL_Event e) {
         printf("Got a SLD_QUIT event!\n");
         g_is_running = false;
     }
+    if(e.type == SDL_KEYDOWN) {
+        if(e.key.keysym.sym == SDLK_ESCAPE) {
+            printf("Escape key pressed, exiting...\n"),
+            g_is_running = false;
+        }
+    }
 }
 
-//@DS:CAN_LEAK_MEMORY
+//@DS:NEEDS_FREE_AFTER_USE
 const char** getRequiredExtensions(uint32_t* extensionCount) {
     unsigned int sdlExtensionCount = 0;
 
@@ -293,14 +305,15 @@ typedef struct {
 } QueueFamilyIndices;
 
 bool QueueFamilyIndices_isComplete(const QueueFamilyIndices* pQFI) {
-    return (pQFI->graphicsFamily != 0) && (pQFI->presentationFamily != 0);
+    return (pQFI->graphicsFamily != UINT32_UNITIALIZED_VALUE) && (pQFI->presentationFamily != UINT32_UNITIALIZED_VALUE);
 }
+
 
 // Returns QFI of a suitable queue, if none is suitable then this panics.
 QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device) {
     QueueFamilyIndices indices = {
-        .graphicsFamily = QUEUE_FAMILY_UNINITIALIZED,
-        .presentationFamily = QUEUE_FAMILY_UNINITIALIZED};
+        .graphicsFamily = UINT32_UNITIALIZED_VALUE,
+        .presentationFamily = UINT32_UNITIALIZED_VALUE};
 
     uint32_t num_queue_families = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(device, &num_queue_families, NULL);
@@ -319,29 +332,77 @@ QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device) {
 
         if(QueueFamilyIndices_isComplete(&indices)) break;
     }
-    if(!QueueFamilyIndices_isComplete(&indices)) PANIC("Couldn't find suitable queue family!");
-
     free(queueFamilies);
     return indices;
 }
 
+struct SwapChainSupportDetails {
+    VkSurfaceCapabilitiesKHR capabilities;
+    VkSurfaceFormatKHR* formats;
+    uint32_t num_formats;
+    VkPresentModeKHR* present_modes;
+    uint32_t num_present_modes;
+};
+void SwapChainSupportDetails_free(struct SwapChainSupportDetails* details) {
+    if (details == NULL) return;
+    free(details->formats); free(details->present_modes);
+    details->formats = NULL; details->present_modes = NULL;
+
+    details->num_formats = UINT32_INVALIDED_VALUE;
+    details->num_present_modes = UINT32_INVALIDED_VALUE;
+}
+
+//@DS:NEEDS_FREE_AFTER_USE
+void querySwapChainSupport(VkPhysicalDevice device, struct SwapChainSupportDetails* details) {
+    details->formats=NULL;
+    details->num_formats=0;
+    details->present_modes=NULL;
+    details->num_present_modes=0;
+
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+        device,
+        g_surface,
+        &details->capabilities);
+
+    vkGetPhysicalDeviceSurfaceFormatsKHR(
+        device,
+        g_surface,
+        &details->num_formats,
+        details->formats);
+    if(details->num_formats != 0) {
+        details->formats = malloc(details->num_formats * sizeof(VkSurfaceFormatKHR));
+        vkGetPhysicalDeviceSurfaceFormatsKHR(
+            device,
+            g_surface,
+            &details->num_formats,
+            details->formats);
+    }
+
+    vkGetPhysicalDeviceSurfacePresentModesKHR(
+        device,
+        g_surface,
+        &details->num_present_modes,
+        NULL);
+    if(details->num_present_modes != 0) {
+        details->present_modes = malloc(details->num_present_modes * sizeof(VkPresentModeKHR));
+        vkGetPhysicalDeviceSurfacePresentModesKHR(device,
+            g_surface,
+            &details->num_present_modes,
+            details->present_modes);
+    }
+}
+
 bool isDeviceSuitable(VkPhysicalDevice device) {
     VkPhysicalDeviceProperties deviceProperties;
-    VkPhysicalDeviceFeatures deviceFeatures;
     vkGetPhysicalDeviceProperties(device, &deviceProperties);
+    VkPhysicalDeviceFeatures deviceFeatures;
     vkGetPhysicalDeviceFeatures(device, &deviceFeatures);
 
-    if(!ALLOW_DEVICE_WITHOUT_INTEGRATED_GPU && deviceProperties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
-        printf("Device is unsuitable bcause it's an integrated GPU.");
+    QueueFamilyIndices indices = findQueueFamilies(device);
+    if(!QueueFamilyIndices_isComplete(&indices)) {
+        fprintf(stderr, "Device does not have the necessary queue families.");
         return false;
     }
-
-    if(!ALLOW_DEVICE_WITHOUT_GEOMETRY_SHADER && !deviceFeatures.geometryShader) {
-        printf("Device is unsuitable because it does not support Geometry Shaders.\n");
-        return false;
-    }
-
-    (void)findQueueFamilies(device); // Check if this device has suitable queue families..
     printf("Device supports suitable queue families.\n");
 
     uint32_t num_available_extensions = 0;
@@ -367,11 +428,21 @@ bool isDeviceSuitable(VkPhysicalDevice device) {
     free(available_extensions);
     printf("Device supports the necessary extensions.\n");
 
-    /* TODO: Implement the querySwapChainSupport functionality. */
+    struct SwapChainSupportDetails details;
+    querySwapChainSupport(device, &details);
+    bool swapchain_is_supported = (details.num_formats > 0) && (details.num_present_modes > 0);
+    SwapChainSupportDetails_free(&details);
+    if(!swapchain_is_supported) {
+        fprintf(stderr, "Device does not support swapchain.");
+        return false;
+    }
 
     VkPhysicalDeviceFeatures supported_features;
     vkGetPhysicalDeviceFeatures(device, &supported_features);
-    if(!supported_features.samplerAnisotropy) PANIC("Device does not support samplerAnisotropy.");
+    if(!supported_features.samplerAnisotropy) {
+        fprintf(stderr, "Device does not support samplerAnisotropy.");
+        return false;
+    }
     return true;
 }
 
@@ -382,15 +453,17 @@ void pickPhysicalDevice() {
     VkPhysicalDevice* physical_devices = malloc(num_physical_devices * sizeof(VkPhysicalDevice));
     vkEnumeratePhysicalDevices(g_instance, &num_physical_devices, physical_devices);
 
+    bool found = false;
     for(size_t i = 0; i < num_physical_devices; i++) {
         VkPhysicalDevice current_device = physical_devices[i];
         if(isDeviceSuitable(current_device)) {
+            found = true;
             g_physical_device = current_device;
             break;
         }
     }
+    if(!found) PANIC("No suitable physical device available!");
     free(physical_devices);
-    if(g_physical_device == VK_NULL_HANDLE) PANIC("No suitable physical device available!");
 }
 
 void createLogicalDevice() {
@@ -452,6 +525,126 @@ void createLogicalDevice() {
     vkGetDeviceQueue(g_device, indices.presentationFamily, 0, &g_presentation_queue);
 }
 
+VkSurfaceFormatKHR chooseSwapSurfaceFormat(const VkSurfaceFormatKHR* available_formats, const uint32_t num_available_formats) {
+    if(num_available_formats == 0) PANIC("No swap surface formats available");
+
+    bool found = false;
+    VkSurfaceFormatKHR current_format;
+    for(int i = 0; i < num_available_formats; i++) {
+        current_format = available_formats[i];
+        if((current_format.format == VK_FORMAT_B8G8R8A8_SRGB) && (current_format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)) {
+            found = true;
+            break;
+        }
+    }
+    if(!found) PANIC("No suitable swap format available!");
+    // ReSharper disable once CppLocalVariableMightNotBeInitialized
+    return current_format;
+}
+
+VkPresentModeKHR chooseSwapPresentMode(const VkPresentModeKHR* available_present_modes, const uint32_t num_available_present_modes) {
+    if(num_available_present_modes == 0) PANIC("No presentation modes available!");
+
+    bool found = false;
+    VkPresentModeKHR current_present_mode;
+    for(int i = 0; i < num_available_present_modes; i++) {
+        current_present_mode = available_present_modes[i];
+        if(current_present_mode == VK_PRESENT_MODE_FIFO_KHR) {
+            found = true;
+            break;
+        }
+    }
+    if(!found) {
+        fprintf(stderr, "Presentation mode VK_PRESENT_MODE_MAILBOX_KHR is not supported, falling back to a random presentation mode.\n");
+        return available_present_modes[0];
+    }
+    return current_present_mode;
+}
+
+VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR* capabilities) {
+    const bool isExtentUndefined = capabilities->currentExtent.width == UINT32_UNITIALIZED_VALUE;
+    if (!isExtentUndefined) return capabilities->currentExtent;
+
+    int width = 0; int height = 0;
+    SDL_Vulkan_GetDrawableSize(g_window, &width, &height);
+    uint32_t clampedWidth = width;
+    if (clampedWidth < capabilities->minImageExtent.width)
+        clampedWidth = capabilities->minImageExtent.width;
+    if (clampedWidth > capabilities->maxImageExtent.width)
+        clampedWidth = capabilities->maxImageExtent.width;
+
+    uint32_t clampedHeight = height;
+    if (clampedHeight < capabilities->minImageExtent.height)
+        clampedHeight = capabilities->minImageExtent.height;
+    if (clampedHeight > capabilities->maxImageExtent.height)
+        clampedHeight = capabilities->maxImageExtent.height;
+    const VkExtent2D actualExtent = {
+        .width = clampedWidth,
+        .height = clampedHeight,
+    };
+
+    return actualExtent;
+}
+
+void createSwapChain() {
+    struct SwapChainSupportDetails details;
+    querySwapChainSupport(g_physical_device, &details);
+
+    VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(details.formats, details.num_formats);
+    VkPresentModeKHR presentMode = chooseSwapPresentMode(details.present_modes, details.num_present_modes);
+    VkExtent2D extent = chooseSwapExtent(&details.capabilities);
+
+    // Limit the number of swap chain images to MAX_FRAMES_IN_FLIGHT
+    uint32_t imageCount = MAX_FRAMES_IN_FLIGHT;
+
+    // Ensure imageCount is within the allowed range
+    if (imageCount < details.capabilities.minImageCount) imageCount = details.capabilities.minImageCount;
+    if (imageCount > details.capabilities.maxImageCount) imageCount = details.capabilities.maxImageCount;
+    if(imageCount == 0) PANIC("swap chain image count is 0!");
+
+    VkSwapchainCreateInfoKHR createInfo = {
+        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        .surface = g_surface,
+        .minImageCount = imageCount,
+        .imageFormat = surfaceFormat.format,
+        .imageColorSpace = surfaceFormat.colorSpace,
+        .imageExtent = extent,
+        .imageArrayLayers = 1,
+        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        .preTransform = details.capabilities.currentTransform,
+        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        .presentMode = presentMode,
+        .clipped = VK_TRUE,
+        .oldSwapchain = VK_NULL_HANDLE,
+    };
+
+    QueueFamilyIndices queue_family_indices = findQueueFamilies(g_physical_device);
+    if(!QueueFamilyIndices_isComplete(&queue_family_indices)) PANIC("queueFamilies is not complete!");
+
+    if (queue_family_indices.graphicsFamily != queue_family_indices.presentationFamily) {
+        fprintf(stdout, "Setting imageSharingMode to Concurrent.\n");
+        createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+        createInfo.queueFamilyIndexCount = 2;
+        createInfo.pQueueFamilyIndices = (uint32_t[]){ queue_family_indices.graphicsFamily, queue_family_indices.presentationFamily };
+    } else {
+        fprintf(stdout, "Setting imageSharingMode to Exclusive.\n");
+        createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        createInfo.queueFamilyIndexCount = 0;
+        createInfo.pQueueFamilyIndices = NULL;
+    }
+
+    if(vkCreateSwapchainKHR(g_device, &createInfo, NULL, &g_swap_chain) != VK_SUCCESS) PANIC("Failed to create swap chain!");
+
+    vkGetSwapchainImagesKHR(g_device, g_swap_chain, &imageCount, NULL);
+    g_swap_chain_images = malloc(imageCount * sizeof(VkImage));
+    vkGetSwapchainImagesKHR(g_device, g_swap_chain, &imageCount, g_swap_chain_images);
+
+    g_swap_chain_image_format = surfaceFormat.format;
+    g_swap_chain_extent = extent;
+
+    SwapChainSupportDetails_free(&details);
+}
+
 int main() {
     printf("Initializing window.\n");
     initWindow();
@@ -467,6 +660,8 @@ int main() {
     printf("Creating Logical Device.\n");
     createLogicalDevice();
 
+    printf("Creating Swap chain.\n");
+    createSwapChain();
 
     SDL_Event e;
     while (g_is_running){
@@ -475,8 +670,8 @@ int main() {
         }
     }
 
+    vkDestroySwapchainKHR(g_device, g_swap_chain, NULL);
     vkDestroyDevice(g_device, NULL);
-
     vkDestroySurfaceKHR(g_instance, g_surface, NULL);
     const PFN_vkDestroyDebugUtilsMessengerEXT func = (PFN_vkDestroyDebugUtilsMessengerEXT)(vkGetInstanceProcAddr(g_instance, "vkDestroyDebugUtilsMessengerEXT"));
     if(func != NULL) func(g_instance, g_debug_messenger, NULL);
