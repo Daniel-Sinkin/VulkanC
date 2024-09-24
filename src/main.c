@@ -163,12 +163,24 @@ VkInstance g_instance = VK_NULL_HANDLE;
 VkSurfaceKHR g_surface = VK_NULL_HANDLE;
 VkPhysicalDevice g_physical_device = VK_NULL_HANDLE;
 VkDevice g_device = VK_NULL_HANDLE;
+
 VkSwapchainKHR g_swap_chain = VK_NULL_HANDLE;
 VkImage* g_swap_chain_images = NULL;
 uint32_t g_num_swap_chain_images = UINT32_UNINITIALIZED_VALUE;
 VkFormat g_swap_chain_image_format = VK_NULL_HANDLE;
 VkImageView* g_swap_chain_image_views = VK_NULL_HANDLE;
+uint32_t g_num_swap_chain_image_views = UINT32_UNINITIALIZED_VALUE;
 VkExtent2D g_swap_chain_extent = {.width = UINT32_UNINITIALIZED_VALUE, .height = UINT32_UNINITIALIZED_VALUE};
+VkFramebuffer* g_swap_chain_framebuffers = VK_NULL_HANDLE;
+uint32_t g_num_swap_chain_framebuffers = UINT32_UNINITIALIZED_VALUE;
+
+VkImage g_color_image;
+VkDeviceMemory g_color_image_memory;
+VkImageView g_color_image_view;
+
+VkImage g_depth_image;
+VkDeviceMemory g_depth_image_memory;
+VkImageView g_depth_image_view;
 
 VkDescriptorSetLayout g_descriptor_set_layout = VK_NULL_HANDLE;
 VkRenderPass g_render_pass = VK_NULL_HANDLE;
@@ -1125,6 +1137,107 @@ void createCommandPool() {
     if (vkCreateCommandPool(g_device, &create_info, NULL, &g_command_pool) != VK_SUCCESS) PANIC("Failed to create command pool!");
 }
 
+uint32_t findMemoryType(const uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+    VkPhysicalDeviceMemoryProperties memProperties;
+    vkGetPhysicalDeviceMemoryProperties(g_physical_device, &memProperties);
+
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+            return i;
+        }
+    }
+    PANIC("Couldn't determine the memory type.");
+}
+
+void createImage(
+    const uint32_t width,
+    const uint32_t height,
+    const uint32_t mipLevels,
+    VkSampleCountFlagBits numSamples,
+    VkFormat format,
+    VkImageTiling tiling,
+    VkImageUsageFlags usage,
+    VkMemoryPropertyFlags properties,
+    VkImage &image,
+    VkDeviceMemory &imageMemory)
+{
+    const VkImageCreateInfo imageInfo{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = format,
+        .extent = {.width = width, .height = height, .depth = 1},
+        .mipLevels = mipLevels,
+        .arrayLayers = 1,
+        .samples = numSamples,
+        .tiling = tiling,
+        .usage = usage,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+
+    if (vkCreateImage(g_device, &imageInfo, NULL, &image) != VK_SUCCESS) PANIC("failed to create image!");
+
+    VkMemoryRequirements memRequirements;
+    vkGetImageMemoryRequirements(g_device, image, &memRequirements);
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memRequirements.size;
+    allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
+
+    if (vkAllocateMemory(g_device, &allocInfo, NULL, &imageMemory) != VK_SUCCESS) PANIC("failed to allocate image memory!");
+
+    vkBindImageMemory(g_device, image, imageMemory, 0);
+}
+
+
+void createColorResources() {
+    createImage(
+        g_swap_chain_extent.width,
+        g_swap_chain_extent.height,
+        1,
+        g_MSAASamples,
+        g_swap_chain_image_format,
+        VK_IMAGE_TILING_OPTIMAL,
+        VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        g_color_image,
+        g_color_image_memory);
+    g_color_image_view = createImageView(g_color_image, g_swap_chain_image_format, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+}
+
+void createDepthResources() {
+    VkFormat depthFormat = findDepthFormat();
+    createImage(
+        g_swap_chain_extent.width,
+        g_swap_chain_extent.height,
+        1,
+        g_MSAASamples,
+        depthFormat,
+        VK_IMAGE_TILING_OPTIMAL,
+        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        g_depth_image,
+        g_depth_image_memory);
+    g_depth_image_view = createImageView(g_depth_image, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
+}
+
+void createFramebuffers() {
+    g_num_swap_chain_framebuffers = g_num_swap_chain_image_views;
+    g_swap_chain_framebuffers = malloc(g_num_swap_chain_framebuffers* sizeof(VkImageView));
+    for (size_t i = 0; i < g_num_swap_chain_framebuffers; i++) {
+        fprintf(stdout, "\t%zu. Framebuffers.\n", i + 1);
+        VkFramebufferCreateInfo framebufferInfo{
+            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            .renderPass = g_render_pass,
+            .attachmentCount = 3,
+            .pAttachments = (VkImageView[]){g_color_image_view, g_depth_image_view, g_swap_chain_image_views[i]},
+            .width = g_swap_chain_extent.width,
+            .height = g_swap_chain_extent.height,
+            .layers = 1};
+        if (vkCreateFramebuffer(g_device, &framebufferInfo, NULL, &g_swap_chain_framebuffers[i]) != VK_SUCCESS) PANIC("failed to create framebuffer!");
+    }
+}
+
 int main() {
     printf("Initializing window.\n");
     initWindow();
@@ -1155,6 +1268,13 @@ int main() {
     printf("Creating Command Pool.\n");
     createCommandPool();
 
+    printf("Creating Color Resources.\n");
+    createColorResources();
+    printf("Creating Depth Resources.\n");
+    createDepthResources();
+    printf("Creating Framebuffers.\n");
+    createFramebuffers();
+
     SDL_Event e;
     g_is_running = true;
     while (g_is_running){
@@ -1173,10 +1293,13 @@ int main() {
     vkDestroyDescriptorSetLayout(g_device, g_descriptor_set_layout, NULL); g_descriptor_set_layout = VK_NULL_HANDLE;
 
     vkDestroyRenderPass(g_device, g_render_pass, NULL); g_render_pass = VK_NULL_HANDLE;
-    for (size_t i = 0; i < g_num_swap_chain_images; i++) {
-        vkDestroyImageView(g_device, g_swap_chain_image_views[i], NULL);
-    }
+
+    for(size_t i = 0; i < g_num_swap_chain_framebuffers; i++)  vkDestroyFramebuffer(g_device, &g_swap_chain_framebuffers[i];
+    free(g_swap_chain_framebuffers);
+
+    for (size_t i = 0; i < g_num_swap_chain_images; i++) vkDestroyImageView(g_device, g_swap_chain_image_views[i], NULL);
     free(g_swap_chain_image_views);
+
     free(g_swap_chain_images);
     vkDestroySwapchainKHR(g_device, g_swap_chain, NULL); g_swap_chain = VK_NULL_HANDLE;
     vkDestroyDevice(g_device, NULL); g_device = VK_NULL_HANDLE;
