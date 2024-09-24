@@ -19,6 +19,8 @@
 SDL_Window* g_window;
 VkInstance g_instance;
 
+VkDebugUtilsMessengerEXT g_debug_messenger;
+
 bool g_is_running = true;
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
@@ -208,7 +210,6 @@ bool initInstance() {
         return false;
     }
     vkEnumerateInstanceExtensionProperties(NULL, &available_extension_count, available_extensions);
-
     for(int i = 0; i < required_extension_count; i++) {
         bool found = false;
         for(int j = 0; j < available_extension_count; j++) {
@@ -225,10 +226,7 @@ bool initInstance() {
     }
 
     if(ENABLE_VALIDATION_LAYERS) {
-        create_info.enabledLayerCount = 1;
-        create_info.ppEnabledLayerNames = (const char*[]){"VK_LAYER_KHRONOS_validation"};
-
-        VkDebugUtilsMessengerCreateInfoEXT debug_create_info = {
+        const VkDebugUtilsMessengerCreateInfoEXT debug_utils_messenger_create_info = {
             .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
             .messageSeverity =
                 VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
@@ -239,25 +237,47 @@ bool initInstance() {
                 VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
                 VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
             .pfnUserCallback = debugCallback};
-        create_info.pNext = &debug_create_info;
+        create_info.ppEnabledLayerNames = (const char*[]){"VK_LAYER_KHRONOS_validation"};
+        create_info.enabledLayerCount = 1;
+        create_info.pNext = &debug_utils_messenger_create_info;
     } else {
         create_info.enabledLayerCount = 0;
         create_info.pNext = NULL;
     }
 
-    if(vkCreateInstance(&create_info, NULL, &g_instance) != VK_SUCCESS) {
+    VkResult result = vkCreateInstance(&create_info, NULL, &g_instance);
+    free(available_extensions); free(required_extensions);
+    if(result != VK_SUCCESS) {
         fprintf(stderr, "Failed to create Vulkan instance!");
-        free(available_extensions); free(required_extensions);
         return false;
     }
 
-    free(available_extensions); free(required_extensions);
+    if(ENABLE_VALIDATION_LAYERS) {
+        const VkDebugUtilsMessengerCreateInfoEXT debug_messenger_create_info = {
+            .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+            .messageSeverity =
+                VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
+                VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+            .messageType =
+                VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+            .pfnUserCallback = debugCallback};
+
+        const PFN_vkCreateDebugUtilsMessengerEXT func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(g_instance, "vkCreateDebugUtilsMessengerEXT");
+        if(func == NULL || func(g_instance, &debug_messenger_create_info, NULL, &g_debug_messenger) != VK_SUCCESS) {
+            fprintf(stderr, "Failed to initialize debug utils messenger.");
+        }
+    }
+
     return true;
 }
 
 int main() {
     if(!initWindow()) return EXIT_FAILURE;
     if(!initInstance()) return EXIT_FAILURE;
+
 
     SDL_Event e;
     while (g_is_running){
@@ -266,6 +286,9 @@ int main() {
         }
     }
 
+    const PFN_vkDestroyDebugUtilsMessengerEXT func = (PFN_vkDestroyDebugUtilsMessengerEXT)(vkGetInstanceProcAddr(g_instance, "vkDestroyDebugUtilsMessengerEXT"));
+    if (func != NULL) func(g_instance, g_debug_messenger, NULL);
+    g_debug_messenger = NULL;
     vkDestroyInstance(g_instance, NULL);
 
     if(g_window) SDL_DestroyWindow(g_window);
