@@ -78,7 +78,9 @@ VkPhysicalDevice g_physical_device = VK_NULL_HANDLE;
 VkDevice g_device = VK_NULL_HANDLE;
 VkSwapchainKHR g_swap_chain = VK_NULL_HANDLE;
 VkImage* g_swap_chain_images = NULL;
+uint32_t g_num_swap_chain_images = 0;
 VkFormat g_swap_chain_image_format = VK_NULL_HANDLE;
+VkImageView* g_swap_chain_image_views = VK_NULL_HANDLE;
 VkExtent2D g_swap_chain_extent;
 
 VkQueue g_graphics_queue = VK_NULL_HANDLE;
@@ -595,17 +597,17 @@ void createSwapChain() {
     VkExtent2D extent = chooseSwapExtent(&details.capabilities);
 
     // Limit the number of swap chain images to MAX_FRAMES_IN_FLIGHT
-    uint32_t imageCount = MAX_FRAMES_IN_FLIGHT;
+    g_num_swap_chain_images = MAX_FRAMES_IN_FLIGHT;
 
     // Ensure imageCount is within the allowed range
-    if (imageCount < details.capabilities.minImageCount) imageCount = details.capabilities.minImageCount;
-    if (imageCount > details.capabilities.maxImageCount) imageCount = details.capabilities.maxImageCount;
-    if(imageCount == 0) PANIC("swap chain image count is 0!");
+    if (g_num_swap_chain_images < details.capabilities.minImageCount) g_num_swap_chain_images = details.capabilities.minImageCount;
+    if (g_num_swap_chain_images > details.capabilities.maxImageCount) g_num_swap_chain_images = details.capabilities.maxImageCount;
+    if(g_num_swap_chain_images == 0) PANIC("swap chain image count is 0!");
 
     VkSwapchainCreateInfoKHR createInfo = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
         .surface = g_surface,
-        .minImageCount = imageCount,
+        .minImageCount = g_num_swap_chain_images,
         .imageFormat = surfaceFormat.format,
         .imageColorSpace = surfaceFormat.colorSpace,
         .imageExtent = extent,
@@ -635,14 +637,32 @@ void createSwapChain() {
 
     if(vkCreateSwapchainKHR(g_device, &createInfo, NULL, &g_swap_chain) != VK_SUCCESS) PANIC("Failed to create swap chain!");
 
-    vkGetSwapchainImagesKHR(g_device, g_swap_chain, &imageCount, NULL);
-    g_swap_chain_images = malloc(imageCount * sizeof(VkImage));
-    vkGetSwapchainImagesKHR(g_device, g_swap_chain, &imageCount, g_swap_chain_images);
+    vkGetSwapchainImagesKHR(g_device, g_swap_chain, &g_num_swap_chain_images, NULL);
+    g_swap_chain_images = malloc(g_num_swap_chain_images * sizeof(VkImage));
+    vkGetSwapchainImagesKHR(g_device, g_swap_chain, &g_num_swap_chain_images, g_swap_chain_images);
 
     g_swap_chain_image_format = surfaceFormat.format;
     g_swap_chain_extent = extent;
 
     SwapChainSupportDetails_free(&details);
+}
+
+VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, const uint32_t mipLevels) {
+    const VkImageViewCreateInfo viewInfo = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = format,
+        .subresourceRange = {
+            .aspectMask = aspectFlags,
+            .baseMipLevel = 0,
+            .levelCount = mipLevels,
+            .baseArrayLayer = 0,
+            .layerCount = 1},
+    };
+    VkImageView imageView = VK_NULL_HANDLE;
+    if (vkCreateImageView(g_device, &viewInfo, NULL, &imageView) != VK_SUCCESS) PANIC("Failed to create texture image view!");
+    return imageView;
 }
 
 int main() {
@@ -662,6 +682,11 @@ int main() {
 
     printf("Creating Swap chain.\n");
     createSwapChain();
+    g_swap_chain_image_views = malloc(g_num_swap_chain_images * sizeof(VkImageView));
+
+    for (size_t i = 0; i < g_num_swap_chain_images; i++) {
+        g_swap_chain_image_views[i] = createImageView(g_swap_chain_images[i], g_swap_chain_image_format, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+    }
 
     SDL_Event e;
     while (g_is_running){
@@ -670,6 +695,11 @@ int main() {
         }
     }
 
+    for (size_t i = 0; i < g_num_swap_chain_images; i++) {
+        vkDestroyImageView(g_device, g_swap_chain_image_views[i], NULL);
+    }
+    free(g_swap_chain_image_views);
+    free(g_swap_chain_images);
     vkDestroySwapchainKHR(g_device, g_swap_chain, NULL);
     vkDestroyDevice(g_device, NULL);
     vkDestroySurfaceKHR(g_instance, g_surface, NULL);
