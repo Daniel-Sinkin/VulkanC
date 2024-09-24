@@ -116,7 +116,7 @@ char *readFile(const char *filename, size_t *out_size) {
         return NULL;
     }
 
-    if (fileSize > LONG_MAX) { // TODO: Check this, I think the cast breaks something
+    if (fileSize > LONG_MAX) {
         fprintf(stderr, "Error: File size exceeds maximum supported size.\n");
         fclose(file);
         return NULL;
