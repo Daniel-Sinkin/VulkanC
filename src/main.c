@@ -83,6 +83,10 @@ VkFormat g_swap_chain_image_format = VK_NULL_HANDLE;
 VkImageView* g_swap_chain_image_views = VK_NULL_HANDLE;
 VkExtent2D g_swap_chain_extent;
 
+VkRenderPass g_render_pass;
+
+VkSampleCountFlagBits g_MSAASamples;
+
 VkQueue g_graphics_queue = VK_NULL_HANDLE;
 VkQueue g_presentation_queue = VK_NULL_HANDLE;
 
@@ -448,6 +452,20 @@ bool isDeviceSuitable(VkPhysicalDevice device) {
     return true;
 }
 
+VkSampleCountFlagBits getMaxUsableSampleCount() {
+    VkPhysicalDeviceProperties physicalDeviceProperties;
+    vkGetPhysicalDeviceProperties(g_physical_device, &physicalDeviceProperties);
+
+    const VkSampleCountFlags counts = physicalDeviceProperties.limits.framebufferColorSampleCounts & physicalDeviceProperties.limits.framebufferDepthSampleCounts;
+    if (counts & VK_SAMPLE_COUNT_64_BIT) return VK_SAMPLE_COUNT_64_BIT;
+    if (counts & VK_SAMPLE_COUNT_32_BIT) return VK_SAMPLE_COUNT_32_BIT;
+    if (counts & VK_SAMPLE_COUNT_16_BIT) return VK_SAMPLE_COUNT_16_BIT;
+    if (counts & VK_SAMPLE_COUNT_8_BIT) return VK_SAMPLE_COUNT_8_BIT;
+    if (counts & VK_SAMPLE_COUNT_4_BIT) return VK_SAMPLE_COUNT_4_BIT;
+    if (counts & VK_SAMPLE_COUNT_2_BIT) return VK_SAMPLE_COUNT_2_BIT;
+    return VK_SAMPLE_COUNT_1_BIT;
+}
+
 void pickPhysicalDevice() {
     uint32_t num_physical_devices = 0;
     vkEnumeratePhysicalDevices(g_instance, &num_physical_devices, NULL);
@@ -465,6 +483,7 @@ void pickPhysicalDevice() {
         }
     }
     if(!found) PANIC("No suitable physical device available!");
+    g_MSAASamples = getMaxUsableSampleCount();
     free(physical_devices);
 }
 
@@ -588,6 +607,24 @@ VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR* capabilities) {
     return actualExtent;
 }
 
+VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, const uint32_t mipLevels) {
+    const VkImageViewCreateInfo viewInfo = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = format,
+        .subresourceRange = {
+            .aspectMask = aspectFlags,
+            .baseMipLevel = 0,
+            .levelCount = mipLevels,
+            .baseArrayLayer = 0,
+            .layerCount = 1},
+    };
+    VkImageView imageView = VK_NULL_HANDLE;
+    if (vkCreateImageView(g_device, &viewInfo, NULL, &imageView) != VK_SUCCESS) PANIC("Failed to create texture image view!");
+    return imageView;
+}
+
 void createSwapChain() {
     struct SwapChainSupportDetails details;
     querySwapChainSupport(g_physical_device, &details);
@@ -645,24 +682,117 @@ void createSwapChain() {
     g_swap_chain_extent = extent;
 
     SwapChainSupportDetails_free(&details);
+
+    g_swap_chain_image_views = malloc(g_num_swap_chain_images * sizeof(VkImageView));
+
+    for (size_t i = 0; i < g_num_swap_chain_images; i++) {
+        g_swap_chain_image_views[i] = createImageView(g_swap_chain_images[i], g_swap_chain_image_format, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+    }
 }
 
-VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, const uint32_t mipLevels) {
-    const VkImageViewCreateInfo viewInfo = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image = image,
-        .viewType = VK_IMAGE_VIEW_TYPE_2D,
-        .format = format,
-        .subresourceRange = {
-            .aspectMask = aspectFlags,
-            .baseMipLevel = 0,
-            .levelCount = mipLevels,
-            .baseArrayLayer = 0,
-            .layerCount = 1},
+bool hasStencilComponent(VkFormat format) {
+    return format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT;
+}
+
+
+VkFormat findSupportedFormat(const VkFormat* candidates, uint32_t num_candidates, VkImageTiling tiling, VkFormatFeatureFlags features) {
+    for(size_t i = 0; i < num_candidates; i++) {
+        VkFormat format = candidates[i];
+        VkFormatProperties props;
+        vkGetPhysicalDeviceFormatProperties(g_physical_device, format, &props);
+
+        if (tiling == VK_IMAGE_TILING_LINEAR) {
+            if ((props.linearTilingFeatures & features) == features) {
+                return format;
+            }
+        } else if (tiling == VK_IMAGE_TILING_OPTIMAL) {
+            if ((props.optimalTilingFeatures & features) == features) {
+                return format;
+            }
+        }
+    }
+    PANIC("Failed to find supported format!");
+}
+
+VkFormat findDepthFormat() {
+    return findSupportedFormat(
+        (VkFormat[]){VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT},
+        3,
+        VK_IMAGE_TILING_OPTIMAL,
+        VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
+    );
+}
+
+
+void createRenderPass() {
+    const VkAttachmentDescription colorAttachment = {
+        .format = g_swap_chain_image_format,
+        .samples = g_MSAASamples,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+
+    const VkAttachmentDescription depthAttachment = {
+        .format = findDepthFormat(),
+        .samples = g_MSAASamples,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+
+    const VkAttachmentDescription colorAttachmentResolve = {
+        .format = g_swap_chain_image_format,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR};
+
+    VkAttachmentReference colorAttachmentRef = {
+        .attachment = 0,
+        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+
+    VkAttachmentReference depthAttachmentRef = {
+        .attachment = 1,
+        .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+
+    VkAttachmentReference colorAttachmentResolveRef = {
+        .attachment = 2,
+        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+
+    VkSubpassDescription description = {
+        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &colorAttachmentRef,
+        .pResolveAttachments = &colorAttachmentResolveRef,
+        .pDepthStencilAttachment = &depthAttachmentRef};
+
+    VkSubpassDependency dependency = {
+        .srcSubpass = VK_SUBPASS_EXTERNAL,
+        .dstSubpass = 0,
+        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+        .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT};
+
+    const VkRenderPassCreateInfo renderPassInfo = {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+        .attachmentCount = 3,
+        .pAttachments = (VkAttachmentDescription[]) { colorAttachment, depthAttachment, colorAttachmentResolve },
+        .subpassCount = 1,
+        .pSubpasses = &description,
+        .dependencyCount = 1,
+        .pDependencies = &dependency
     };
-    VkImageView imageView = VK_NULL_HANDLE;
-    if (vkCreateImageView(g_device, &viewInfo, NULL, &imageView) != VK_SUCCESS) PANIC("Failed to create texture image view!");
-    return imageView;
+
+    if (vkCreateRenderPass(g_device, &renderPassInfo, NULL, &g_render_pass) != VK_SUCCESS) PANIC("failed to create render pass!");
 }
 
 int main() {
@@ -682,11 +812,9 @@ int main() {
 
     printf("Creating Swap chain.\n");
     createSwapChain();
-    g_swap_chain_image_views = malloc(g_num_swap_chain_images * sizeof(VkImageView));
 
-    for (size_t i = 0; i < g_num_swap_chain_images; i++) {
-        g_swap_chain_image_views[i] = createImageView(g_swap_chain_images[i], g_swap_chain_image_format, VK_IMAGE_ASPECT_COLOR_BIT, 1);
-    }
+    printf("Creating Render Pass.\n");
+    createRenderPass();
 
     SDL_Event e;
     while (g_is_running){
@@ -695,6 +823,7 @@ int main() {
         }
     }
 
+    vkDestroyRenderPass(g_device, g_render_pass, NULL);
     for (size_t i = 0; i < g_num_swap_chain_images; i++) {
         vkDestroyImageView(g_device, g_swap_chain_image_views[i], NULL);
     }
