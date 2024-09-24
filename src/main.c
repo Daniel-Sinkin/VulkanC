@@ -69,11 +69,14 @@
 
 
 SDL_Window* g_window;
+
 VkInstance g_instance;
-
-VkSurfaceKHR g_surface;
-
+VkSurfaceKHR g_surface = VK_NULL_HANDLE;
 VkPhysicalDevice g_physical_device = VK_NULL_HANDLE;
+VkDevice g_device = VK_NULL_HANDLE;
+
+VkQueue g_graphics_queue = VK_NULL_HANDLE;
+VkQueue g_presentation_queue = VK_NULL_HANDLE;
 
 VkDebugUtilsMessengerEXT g_debug_messenger;
 
@@ -241,6 +244,7 @@ void initInstance() {
         if(!found) PANIC("Failed to find required extension '%s'", required_extensions[i]);
     }
 
+
     if(ENABLE_VALIDATION_LAYERS) {
         const VkDebugUtilsMessengerCreateInfoEXT debug_utils_messenger_create_info = {
             .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
@@ -261,6 +265,7 @@ void initInstance() {
     }
 
     if(vkCreateInstance(&create_info, NULL, &g_instance) != VK_SUCCESS) PANIC("Failed to create Vulkan instance!");
+    free(required_extensions);
 
     if(ENABLE_VALIDATION_LAYERS) {
         const VkDebugUtilsMessengerCreateInfoEXT debug_messenger_create_info = {
@@ -347,14 +352,17 @@ bool isDeviceSuitable(VkPhysicalDevice device) {
     const char* required_extensions[] = REQUIRED_DEVICE_EXTENSIONS;
     size_t num_required_extensions = sizeof(required_extensions) / sizeof(required_extensions[0]);
     for(size_t i = 0; i < num_required_extensions; i++) {
-        bool found = true;
+        bool found = false;
         for(size_t j = 0; j < num_available_extensions; j++) {
             if(strcmp(available_extensions[j].extensionName, required_extensions[i]) == 0) {
                 found = true;
                 break;
             }
         }
-        if(!found) PANIC("Required extension not found: %s", required_extensions[i]);
+        if(!found) {
+            free(available_extensions);
+            return false;
+        }
     }
     free(available_extensions);
     printf("Device supports the necessary extensions.\n");
@@ -385,14 +393,79 @@ void pickPhysicalDevice() {
     if(g_physical_device == VK_NULL_HANDLE) PANIC("No suitable physical device available!");
 }
 
+void createLogicalDevice() {
+    QueueFamilyIndices indices = findQueueFamilies(g_physical_device);
+
+    bool indices_are_same = (indices.presentationFamily == indices.graphicsFamily);
+    if(!QueueFamilyIndices_isComplete(&indices)) PANIC("Invalid QueueFamilyIndices");
+
+    VkDeviceQueueCreateInfo* queue_create_infos;
+    uint32_t num_queue_create_infos;
+    float queuePriority = 1.0f;
+    if(indices_are_same) {
+        VkDeviceQueueCreateInfo graphics_queue_create_info = {
+            .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            .queueFamilyIndex = indices.graphicsFamily,
+            .queueCount = 1,
+            .pQueuePriorities = &queuePriority};
+        queue_create_infos = malloc(sizeof(VkDeviceQueueCreateInfo));
+        queue_create_infos[0] = graphics_queue_create_info;
+        num_queue_create_infos = 1;
+    } else {
+        VkDeviceQueueCreateInfo graphics_queue_create_info = {
+            .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            .queueFamilyIndex = indices.graphicsFamily,
+            .queueCount = 1,
+            .pQueuePriorities = &queuePriority};
+        VkDeviceQueueCreateInfo presentation_queue_create_info = {
+            .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            .queueFamilyIndex = indices.graphicsFamily,
+            .queueCount = 1,
+            .pQueuePriorities = &queuePriority};
+        queue_create_infos = malloc(sizeof(VkDeviceQueueCreateInfo));
+        queue_create_infos[0] = graphics_queue_create_info;
+        queue_create_infos[1] = presentation_queue_create_info;
+        num_queue_create_infos = 2;
+    }
+
+    VkPhysicalDeviceFeatures device_features = {.samplerAnisotropy = VK_TRUE};
+
+    const char* required_extensions[] = REQUIRED_DEVICE_EXTENSIONS;
+    size_t num_required_extensions = sizeof(required_extensions) / sizeof(required_extensions[0]);
+    VkDeviceCreateInfo createInfo = {
+        .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        .queueCreateInfoCount = num_queue_create_infos,
+        .pQueueCreateInfos = queue_create_infos,
+        .enabledExtensionCount = num_required_extensions,
+        .ppEnabledExtensionNames = required_extensions,
+        .pEnabledFeatures = &device_features};
+    createInfo.enabledLayerCount = 0;
+
+    if(ENABLE_VALIDATION_LAYERS) {
+        createInfo.enabledLayerCount = 1;
+        createInfo.ppEnabledLayerNames = (const char*[]){"VK_LAYER_KHRONOS_validation"};
+    }
+
+    if (vkCreateDevice(g_physical_device, &createInfo, NULL, &g_device) != VK_SUCCESS) PANIC("Failed to create device.");
+
+    vkGetDeviceQueue(g_device, indices.graphicsFamily, 0, &g_graphics_queue);
+    vkGetDeviceQueue(g_device, indices.presentationFamily, 0, &g_presentation_queue);
+}
 
 int main() {
+    printf("Initializing window.\n");
     initWindow();
+    printf("Initializing Instance.\n");
     initInstance();
 
+    printf("Creating Vulkan Surface.\n");
     if(!SDL_Vulkan_CreateSurface(g_window, g_instance, &g_surface)) PANIC("Failed to bind SDL window to VkSurface.");
 
+    printf("Picking Physical Device.\n");
     pickPhysicalDevice();
+
+    printf("Creating Logical Device.\n");
+    createLogicalDevice();
 
 
     SDL_Event e;
@@ -401,6 +474,8 @@ int main() {
             handleInput(e);
         }
     }
+
+    vkDestroyDevice(g_device, NULL);
 
     vkDestroySurfaceKHR(g_instance, g_surface, NULL);
     const PFN_vkDestroyDebugUtilsMessengerEXT func = (PFN_vkDestroyDebugUtilsMessengerEXT)(vkGetInstanceProcAddr(g_instance, "vkDestroyDebugUtilsMessengerEXT"));
