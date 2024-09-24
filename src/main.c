@@ -814,6 +814,35 @@ VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags a
     return imageView;
 }
 
+void createTextureImageView() {
+    g_texture_image_view = createImageView(g_texture_image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT, g_mip_levels);
+}
+
+void createTextureSampler() {
+    VkPhysicalDeviceProperties properties;
+    vkGetPhysicalDeviceProperties(g_physical_device, &properties);
+
+    const VkSamplerCreateInfo samplerInfo = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = VK_FILTER_LINEAR,
+        .minFilter = VK_FILTER_LINEAR,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .mipLodBias = 0.0f,
+        .anisotropyEnable = VK_TRUE,
+        .maxAnisotropy = properties.limits.maxSamplerAnisotropy,
+        .compareEnable = VK_FALSE,
+        .compareOp = VK_COMPARE_OP_ALWAYS,
+        .minLod = 0,
+        .maxLod = (float)g_mip_levels,
+        .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+        .unnormalizedCoordinates = VK_FALSE};
+
+    if (vkCreateSampler(g_device, &samplerInfo, NULL, &g_texture_sampler) != VK_SUCCESS) PANIC("failed to create texture sampler!");
+}
+
 void createSwapChain() {
     SwapChainSupportDetails details;
     querySwapChainSupport(g_physical_device, &details);
@@ -1726,9 +1755,8 @@ int main() {
     /*
      * CLEANUP Code
      */
-    if(g_texture_sampler != VK_NULL_HANDLE) { vkDestroySampler(g_device, g_texture_sampler, NULL); g_texture_sampler = VK_NULL_HANDLE; }
-    if(g_texture_image_view != VK_NULL_HANDLE) { vkDestroyImageView(g_device, g_texture_image_view, NULL); g_texture_image_view = VK_NULL_HANDLE; }
-
+    vkDestroySampler(g_device, g_texture_sampler, NULL); g_texture_sampler = VK_NULL_HANDLE;
+    vkDestroyImageView(g_device, g_texture_image_view, NULL); g_texture_image_view = VK_NULL_HANDLE;
     vkFreeMemory(g_device, g_texture_image_memory, NULL); g_texture_image_memory = VK_NULL_HANDLE;
     vkDestroyImage(g_device, g_texture_image, NULL); g_texture_image = VK_NULL_HANDLE;
 
