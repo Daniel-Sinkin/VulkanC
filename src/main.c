@@ -16,8 +16,55 @@
 
 #define ENABLE_VALIDATION_LAYERS true
 
+#define REQUIRED_VULKAN_API_VERSION VK_API_VERSION_1_3
+
+
+// PANIC macro to print error details (with file, line, and function info) and abort
+// While not very clean I am explicitly fine with memory leaks when PANIC is called during the initialization
+// as the program gets terminated, might clean that up later on, maybe build some custom unique_ptr setup for the initialziation.
+#define PANIC(fmt, ...) \
+    do { \
+        fprintf(stderr, "PANIC in function %s (file: %s, line: %d): ", __func__, __FILE__, __LINE__); \
+        fprintf(stderr, fmt, ##__VA_ARGS__); \
+        fprintf(stderr, "\n"); \
+        abort(); \
+    } while(0)
+
+// This is a workaround to the fact that
+// const char* err_msg = "asd";
+// PANIC(err_msg)
+// does not work, we need ot call PANIC("%s", err_msg) instead which is exactly what this new macro does.
+#define PANIC_STR(msg) PANIC("%s", msg)
+
+// If we are in debug mode (i.e. when NDEBUG is false), we use this malloc/realloc with metadata
+// to track if malloc ever returns a NULL handle.
+// I might later expand this to track the memory with an id to look for memory leaks.
+#ifndef NDEBUG
+    #define malloc(size) debug_malloc(size)
+    #define realloc(ptr, size) debug_realloc(ptr, size)
+
+    void* debug_malloc(const size_t size) {
+        #undef malloc
+        void* ptr = malloc(size);  // Call the real malloc
+        #define malloc(size) debug_malloc(size)
+        if(ptr == NULL) PANIC("Failed to allocate %zu bytes.", size);
+        return ptr;
+    }
+
+    void* debug_realloc(void* ptr, const size_t size) {
+    #undef realloc
+            void* new_ptr = realloc(ptr, size);  // Call the real realloc
+    #define realloc(ptr, size) debug_realloc(ptr, size)
+            if (new_ptr == NULL) PANIC("Failed to reallocate %zu bytes.", size);
+            return new_ptr;
+        }
+#endif // not NDEBUG
+
+
 SDL_Window* g_window;
 VkInstance g_instance;
+
+VkSurfaceKHR g_surface;
 
 VkDebugUtilsMessengerEXT g_debug_messenger;
 
@@ -34,20 +81,19 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     return VK_FALSE;
 }
 
-bool initWindow() {
+void initWindow() {
     printf("Trying to initialize window.\n");
 
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
-        fprintf(stderr, "Failed to initialize SDL: %s\n", SDL_GetError());
-        return false;
+    if(SDL_Init(SDL_INIT_VIDEO) != 0) {
+        PANIC_STR(SDL_GetError());
     }
 
-    if (!SDL_Vulkan_LoadLibrary(NULL)) {
+    if(!SDL_Vulkan_LoadLibrary(NULL)) {
         printf("Vulkan support is available.\n");
     } else {
-        fprintf(stderr, "Vulkan support not found: %s\n", SDL_GetError());
+        const char* err_msg = SDL_GetError();
         SDL_Quit();
-        return false;
+        PANIC_STR(err_msg);
     }
     SDL_Vulkan_LoadLibrary(NULL);
 
@@ -60,44 +106,36 @@ bool initWindow() {
         SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN
     );
 
-    if (!g_window) {
-        printf("Failed to create SDL window: %s\n", SDL_GetError());
-        SDL_Quit();
-        return false;
+    if(!g_window) {
+        const char* error_message = SDL_GetError(); SDL_Quit();
+        PANIC_STR(error_message);
     }
 
     SDL_SetWindowResizable(g_window, SDL_FALSE);
 
     printf("Successfully initialized window.\n");
-    return true;
 }
 
 void handleInput(const SDL_Event e) {
-    if (e.type == SDL_QUIT) {
+    if(e.type == SDL_QUIT) {
         printf("Got a SLD_QUIT event!\n");
         g_is_running = false;
     }
 }
 
-/*
- * It is the callers responsibility to free extensionCount after use!
- */
+//@DS:CAN_LEAK_MEMORY
 const char** getRequiredExtensions(uint32_t* extensionCount) {
     unsigned int sdlExtensionCount = 0;
 
-    if (!SDL_Vulkan_GetInstanceExtensions(NULL, &sdlExtensionCount, NULL)) {
+    if(!SDL_Vulkan_GetInstanceExtensions(NULL, &sdlExtensionCount, NULL)) {
         SDL_Log("Could not get Vulkan instance extensions: %s", SDL_GetError());
         return NULL;
     }
 
     const char** sdlExtensions = malloc(sdlExtensionCount * sizeof(const char*));
-    if (!sdlExtensions) {
-        SDL_Log("Failed to allocate memory for SDL Vulkan extensions");
-        return NULL;
-    }
 
     // Get the actual extension names
-    if (!SDL_Vulkan_GetInstanceExtensions(NULL, &sdlExtensionCount, sdlExtensions)) {
+    if(!SDL_Vulkan_GetInstanceExtensions(NULL, &sdlExtensionCount, sdlExtensions)) {
         SDL_Log("Could not get Vulkan instance extensions: %s", SDL_GetError());
         free(sdlExtensions);
         return NULL;
@@ -110,11 +148,6 @@ const char** getRequiredExtensions(uint32_t* extensionCount) {
 
     if(ENABLE_VALIDATION_LAYERS) {
         const char** temp = realloc(extensions, (*extensionCount + 1) * sizeof(const char*));
-        if(temp == NULL) {
-            fprintf(stderr, "Failed to reallocate in getRequiredExtensions!");
-            free(extensions);
-            return NULL;
-        }
         extensions = temp;
         extensions[*extensionCount] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
         *extensionCount += 1;
@@ -123,46 +156,38 @@ const char** getRequiredExtensions(uint32_t* extensionCount) {
     return extensions;
 }
 
-bool checkValidationLayerSupport() {
+void checkValidationLayerSupport() {
     uint32_t layer_count;
     vkEnumerateInstanceLayerProperties(&layer_count, NULL);
-
-    if(layer_count == 0) {
-        fprintf(stderr, "No Instance Layers supported, so in particular no validation layers!\n");
-        return false;
-    }
+    if(layer_count == 0) PANIC("No Instance Layers supported, so in particular no validation layers!");
 
     printf("Checking Validation Layer Support.\n");
-    VkLayerProperties* availiable_layers = malloc(layer_count * sizeof(VkLayerProperties));
-    vkEnumerateInstanceLayerProperties(&layer_count, availiable_layers);
+    VkLayerProperties* available_layers = malloc(layer_count * sizeof(VkLayerProperties));
+    vkEnumerateInstanceLayerProperties(&layer_count, available_layers);
     bool found = false;
     for(size_t i = 0; i < layer_count; i++) {
-        if(strcmp(availiable_layers[i].layerName, "VK_LAYER_KHRONOS_validation") == 0) {
+        if(strcmp(available_layers[i].layerName, "VK_LAYER_KHRONOS_validation") == 0) {
             found = true;
             break;
         }
     }
-    free(availiable_layers); availiable_layers = NULL;
+    free(available_layers); available_layers = NULL;
 
-    if(!found) {
-        fprintf(stderr, "Couldn't find the required layers.\n");
-        return false;
-    }
-    printf("Found all necessary layers.\n");
-    return true;
+    if(!found) PANIC("Validation layer is not supported.");
+    printf("Validation layer is supported.\n");
 }
 
-bool initInstance() {
-    if(ENABLE_VALIDATION_LAYERS) {
-        if(!checkValidationLayerSupport()) {
-            fprintf(stderr, "Validation errors are activated but not supported!");
-            return false;
-        }
-    }
+void initInstance() {
+    if(ENABLE_VALIDATION_LAYERS) { checkValidationLayerSupport(); }
 
     uint32_t apiVersion = 0;
-    if(vkEnumerateInstanceVersion(&apiVersion) != VK_SUCCESS) return false;
-    if(apiVersion < VK_API_VERSION_1_3) return false;
+    vkEnumerateInstanceVersion(&apiVersion);
+    if(apiVersion < REQUIRED_VULKAN_API_VERSION) {
+        PANIC("Available Vulkan API version %u.%u.%u < %u.%u.%u!",
+            VK_API_VERSION_MAJOR(apiVersion), VK_API_VERSION_MINOR(apiVersion), VK_API_VERSION_PATCH(apiVersion),
+            VK_API_VERSION_MAJOR(REQUIRED_VULKAN_API_VERSION), VK_API_VERSION_MINOR(REQUIRED_VULKAN_API_VERSION), VK_API_VERSION_PATCH(REQUIRED_VULKAN_API_VERSION)
+        );
+    }
 
     VkApplicationInfo appInfo = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -171,7 +196,7 @@ bool initInstance() {
         .applicationVersion = VK_MAKE_VERSION(0, 0, 1),
         .pEngineName = "No Engine",
         .engineVersion = VK_MAKE_VERSION(0, 0, 1),
-        .apiVersion = VK_API_VERSION_1_3};
+        .apiVersion = REQUIRED_VULKAN_API_VERSION};
 
     VkInstanceCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
@@ -180,20 +205,11 @@ bool initInstance() {
         .ppEnabledLayerNames = NULL};
 
     uint32_t required_extension_count;
+    // ReSharper disable once CppDFAMemoryLeak
     const char** required_extensions = getRequiredExtensions(&required_extension_count);
-    if(required_extensions == NULL) {
-        free(required_extensions);
-        return false;
-    }
 
 #if defined(__APPLE__) && defined(__arm64__)
-    const char** temp = realloc(required_extensions, (required_extension_count + 2) * sizeof(const char*));
-    if(temp == NULL) {
-        fprintf(stderr, "Failed to reallocate for MacOS specific extensions.");
-        free(required_extensions);
-        return false;
-    }
-    required_extensions = temp;
+    required_extensions = realloc(required_extensions, (required_extension_count + 2) * sizeof(const char*));
     required_extensions[required_extension_count++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
     required_extensions[required_extension_count++] = VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME;
     create_info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
@@ -204,11 +220,6 @@ bool initInstance() {
     uint32_t available_extension_count;
     vkEnumerateInstanceExtensionProperties(NULL, &available_extension_count, NULL);
     VkExtensionProperties* available_extensions = malloc(available_extension_count * sizeof(VkExtensionProperties));
-    if(available_extensions == NULL) {
-        fprintf(stderr, "Failed to allocate extension info.");
-        free(required_extensions);
-        return false;
-    }
     vkEnumerateInstanceExtensionProperties(NULL, &available_extension_count, available_extensions);
     for(int i = 0; i < required_extension_count; i++) {
         bool found = false;
@@ -218,11 +229,7 @@ bool initInstance() {
                 break;
             }
         }
-        if(!found) {
-            fprintf(stderr, "Failed to find required extension '%s'", required_extensions[i]);
-            free(available_extensions); free(required_extensions);
-            return false;
-        }
+        if(!found) PANIC("Failed to find required extension '%s'", required_extensions[i]);
     }
 
     if(ENABLE_VALIDATION_LAYERS) {
@@ -241,16 +248,10 @@ bool initInstance() {
         create_info.enabledLayerCount = 1;
         create_info.pNext = &debug_utils_messenger_create_info;
     } else {
-        create_info.enabledLayerCount = 0;
-        create_info.pNext = NULL;
+        create_info.enabledLayerCount = 0; create_info.pNext = NULL;
     }
 
-    VkResult result = vkCreateInstance(&create_info, NULL, &g_instance);
-    free(available_extensions); free(required_extensions);
-    if(result != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create Vulkan instance!");
-        return false;
-    }
+    if(vkCreateInstance(&create_info, NULL, &g_instance) != VK_SUCCESS) PANIC("Failed to create Vulkan instance!");
 
     if(ENABLE_VALIDATION_LAYERS) {
         const VkDebugUtilsMessengerCreateInfoEXT debug_messenger_create_info = {
@@ -267,17 +268,28 @@ bool initInstance() {
 
         const PFN_vkCreateDebugUtilsMessengerEXT func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(g_instance, "vkCreateDebugUtilsMessengerEXT");
         if(func == NULL || func(g_instance, &debug_messenger_create_info, NULL, &g_debug_messenger) != VK_SUCCESS) {
-            fprintf(stderr, "Failed to initialize debug utils messenger.");
+            PANIC("Failed to initialize debug utils messenger.");
         }
     }
+}
 
-    return true;
+void pickPhysicalDevice() {
+    uint32_t n_physical_devices = 0;
+    vkEnumeratePhysicalDevices(g_instance, &n_physical_devices, NULL);
+    if(n_physical_devices == 0) PANIC("No physical devices found!");
+    VkPhysicalDevice* physical_devices = malloc(n_physical_devices * sizeof(VkPhysicalDevice));
+    vkEnumeratePhysicalDevices(g_instance, &n_physical_devices, physical_devices);
+
+    free(physical_devices);
 }
 
 int main() {
-    if(!initWindow()) return EXIT_FAILURE;
-    if(!initInstance()) return EXIT_FAILURE;
+    initWindow();
+    initInstance();
 
+    if(!SDL_Vulkan_CreateSurface(g_window, g_instance, &g_surface)) PANIC("Failed to bind SDL window to VkSurface.");
+
+    pickPhysicalDevice();
 
     SDL_Event e;
     while (g_is_running){
@@ -286,8 +298,9 @@ int main() {
         }
     }
 
+    vkDestroySurfaceKHR(g_instance, g_surface, NULL);
     const PFN_vkDestroyDebugUtilsMessengerEXT func = (PFN_vkDestroyDebugUtilsMessengerEXT)(vkGetInstanceProcAddr(g_instance, "vkDestroyDebugUtilsMessengerEXT"));
-    if (func != NULL) func(g_instance, g_debug_messenger, NULL);
+    if(func != NULL) func(g_instance, g_debug_messenger, NULL);
     g_debug_messenger = NULL;
     vkDestroyInstance(g_instance, NULL);
 
