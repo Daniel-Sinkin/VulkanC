@@ -56,7 +56,7 @@ void start_timer(Timer* t, const char* file, const int line, const char* func) {
 void stop_timer(const Timer* t) {
     const clock_t end = clock();
     const double elapsed = (double)(end - t->start) / CLOCKS_PER_SEC;
-    printf("[[SCOPE_TIMER]] %s | File: %s | Line: %d | Function: %s | Elapsed time: %.3f seconds\n", t->info, t->file, t->line, t->func, elapsed);
+    printf("[[DS-SCOPE_TIMER]] %s | File: %s | Line: %d | Function: %s | Elapsed time: %.3f seconds\n", t->info, t->file, t->line, t->func, elapsed);
 }
 
 // Cleanup function: Automatically called when the Timer goes out of scope
@@ -75,7 +75,7 @@ start_timer(&_timer_instance, __FILE__, __LINE__, __func__);
 // as the program gets terminated, might clean that up later on, maybe build some custom unique_ptr setup for the initialization.
 #define PANIC(fmt, ...) \
     do { \
-        fprintf(stderr, "PANIC in function %s (file: %s, line: %d): ", __func__, __FILE__, __LINE__); \
+        fprintf(stderr, "[[DS-PANIC]] function %s (file: %s, line: %d): ", __func__, __FILE__, __LINE__); \
         fprintf(stderr, fmt, ##__VA_ARGS__); \
         fprintf(stderr, "\n"); \
         abort(); \
@@ -87,45 +87,49 @@ start_timer(&_timer_instance, __FILE__, __LINE__, __func__);
 // does not work, we need ot call PANIC("%s", err_msg) instead which is exactly what this new macro does.
 #define PANIC_STR(msg) PANIC("%s", msg)
 
-// If we are in debug mode (i.e., when NDEBUG is false), we use this malloc/realloc with metadata
-// to track if malloc ever returns a NULL handle.
+// If we are in debug mode (i.e., when NDEBUG is false), we use this malloc/realloc/free with metadata
 #ifndef NDEBUG
-    // Redefine malloc and realloc macros to include file, line, and function metadata
+    // Redefine malloc, realloc, and free macros to include file, line, function, and variable name metadata
     #define malloc(size) debug_malloc(size, __FILE__, __LINE__, __func__)
     #define realloc(ptr, size) debug_realloc(ptr, size, __FILE__, __LINE__, __func__)
+    #define free(ptr) debug_free(ptr, #ptr, __FILE__, __LINE__, __func__)
 
     // Debug malloc function with metadata
     void* debug_malloc(const size_t size, const char* file, int line, const char* func) {
-        printf("malloc(size=%zu) called from file: %s, line: %d, function: %s\n", size, file, line, func);
+        printf("[[DS-MEMORY]] malloc(size=%zu) called from file: %s, line: %d, function: %s, ", size, file, line, func);
 
-        // Temporarily undefine malloc to call the real malloc
-    #undef malloc
+        #undef malloc
         void* ptr = malloc(size);  // Call the real malloc
-    #define malloc(size) debug_malloc(size, __FILE__, __LINE__, __func__)
+        #define malloc(size) debug_malloc(size, __FILE__, __LINE__, __func__)
 
-        if (ptr == NULL) {
-            fprintf(stderr, "PANIC: Failed to allocate %zu bytes in file %s, line %d, function %s\n", size, file, line, func);
-            exit(EXIT_FAILURE);  // Replace PANIC with exit for simplicity
-        }
+        if (ptr == NULL) PANIC("[[DS-MEMORY]] Failed to allocate %zu bytes in file %s, line %d, function %s", size, file, line, func);
+        printf("Pointer allocated at: %p\n", ptr);
         return ptr;
     }
 
     // Debug realloc function with metadata
     void* debug_realloc(void* ptr, const size_t size, const char* file, int line, const char* func) {
-        printf("realloc(ptr=%p, size=%zu) called from file: %s, line: %d, function: %s\n", ptr, size, file, line, func);
+        printf("[[DS-MEMORY]] realloc(ptr=%p, size=%zu) called from file: %s, line: %d, function: %s, ", ptr, size, file, line, func);
 
-        // Temporarily undefine realloc to call the real realloc
-    #undef realloc
+        #undef realloc
         void* new_ptr = realloc(ptr, size);  // Call the real realloc
-    #define realloc(ptr, size) debug_realloc(ptr, size, __FILE__, __LINE__, __func__)
+        #define realloc(ptr, size) debug_realloc(ptr, size, __FILE__, __LINE__, __func__)
 
-        if (new_ptr == NULL) {
-            fprintf(stderr, "PANIC: Failed to reallocate %zu bytes in file %s, line %d, function %s\n", size, file, line, func);
-            exit(EXIT_FAILURE);  // Replace PANIC with exit for simplicity
-        }
+        if (new_ptr == NULL) PANIC("[[DS-MEMORY]] Failed to reallocate %zu bytes in file %s, line %d, function %s", size, file, line, func);
+        printf("Pointer reallocated at: %p\n", new_ptr);
         return new_ptr;
     }
-#endif // not NDEBUG
+
+    // Debug free function with metadata and variable name
+    void debug_free(void* ptr, const char* var_name, const char* file, int line, const char* func) {
+        printf("[[DS-MEMORY]] free(ptr=%p, variable=%s) called from file: %s, line: %d, function: %s\n", ptr, var_name, file, line, func);
+
+        #undef free
+        free(ptr);  // Call the real free
+        #define free(ptr) debug_free(ptr, #ptr, __FILE__, __LINE__, __func__)
+    }
+
+#endif // not NDEBUGG
 
 // Function to check if the file is a regular file using stat
 int is_regular_file(const char *filename) {
@@ -246,17 +250,19 @@ VkDebugUtilsMessengerEXT g_debug_messenger;
 bool g_is_running = false;
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
+    // ReSharper disable once CppParameterMayBeConst
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+    // ReSharper disable once CppParameterMayBeConst
     VkDebugUtilsMessageTypeFlagsEXT messageType,
     const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData,
     // ReSharper disable once CppParameterMayBeConstPtrOrRef
     void *pUserData
 ) {
     (void)messageType; (void)pUserData; // Suppressed "Unused Parameter" warning
-    if(messageSeverity == VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) printf("Validation Layer [INFO]: %s\n", pCallbackData->pMessage);
-    else if(messageSeverity == VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) fprintf(stderr, "Validation Layer [ERROR]: %s\n", pCallbackData->pMessage);
-    else if(messageSeverity == VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) printf("Validation Layer [WARNING]: %s\n", pCallbackData->pMessage);
-    else if(messageSeverity == VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) printf("Validation Layer [VERBOSE]: %s\n", pCallbackData->pMessage);
+    if(messageSeverity == VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) printf("[[VK-Validation_INFO]] %s\n", pCallbackData->pMessage);
+    else if(messageSeverity == VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) fprintf(stderr, "[[VK-Validation_ERROR]] %s\n", pCallbackData->pMessage);
+    else if(messageSeverity == VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) printf("[[VK-Validation_WARNING]] %s\n", pCallbackData->pMessage);
+    else if(messageSeverity == VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) printf("[[VK-Validation_VERBOSE]] %s\n", pCallbackData->pMessage);
     else PANIC("Unknown messageSeverity!");
     return VK_FALSE;
 }
