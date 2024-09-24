@@ -1,22 +1,19 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_vulkan.h>
-
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_beta.h>
-
 #include <cjson/cJSON.h>
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
-
+#include <stdio.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <arm/limits.h>
 #include <sys/stat.h>
-
 #include <cglm/cglm.h>
 
 #define TINYOBJLOADER_IMPLEMENTATION
@@ -39,9 +36,43 @@
 
 #define MAX_FRAMES_IN_FLIGHT 2
 
+// Typedef for the Timer struct
+typedef struct Timer {
+    clock_t start;
+    const char *file;
+    int line;
+    const char *func;
+    const char *info;
+} Timer;
+
+// Function to start the timer, with file, line, and function info
+void start_timer(Timer* t, const char* file, const int line, const char* func) {
+    t->start = clock();
+    t->file = file;
+    t->line = line;
+    t->func = func;
+}
+
+void stop_timer(const Timer* t) {
+    const clock_t end = clock();
+    const double elapsed = (double)(end - t->start) / CLOCKS_PER_SEC;
+    printf("[[SCOPE_TIMER]] %s | File: %s | Line: %d | Function: %s | Elapsed time: %.3f seconds\n", t->info, t->file, t->line, t->func, elapsed);
+}
+
+// Cleanup function: Automatically called when the Timer goes out of scope
+void timer_cleanup(const Timer* t) {
+    stop_timer(t);
+}
+
+// Macro to declare a Timer that automatically stops when leaving scope
+#define SCOPE_TIMER __attribute__((cleanup(timer_cleanup))) \
+Timer _timer_instance; \
+start_timer(&_timer_instance, __FILE__, __LINE__, __func__);
+
+
 // PANIC macro to print error details (with file, line, and function info) and abort
 // While not very clean I am explicitly fine with memory leaks when PANIC is called during the initialization
-// as the program gets terminated, might clean that up later on, maybe build some custom unique_ptr setup for the initialziation.
+// as the program gets terminated, might clean that up later on, maybe build some custom unique_ptr setup for the initialization.
 #define PANIC(fmt, ...) \
     do { \
         fprintf(stderr, "PANIC in function %s (file: %s, line: %d): ", __func__, __FILE__, __LINE__); \
@@ -56,35 +87,50 @@
 // does not work, we need ot call PANIC("%s", err_msg) instead which is exactly what this new macro does.
 #define PANIC_STR(msg) PANIC("%s", msg)
 
-// If we are in debug mode (i.e. when NDEBUG is false), we use this malloc/realloc with metadata
+// If we are in debug mode (i.e., when NDEBUG is false), we use this malloc/realloc with metadata
 // to track if malloc ever returns a NULL handle.
-// I might later expand this to track the memory with an id to look for memory leaks.
 #ifndef NDEBUG
-    #define malloc(size) debug_malloc(size)
-    #define realloc(ptr, size) debug_realloc(ptr, size)
+    // Redefine malloc and realloc macros to include file, line, and function metadata
+    #define malloc(size) debug_malloc(size, __FILE__, __LINE__, __func__)
+    #define realloc(ptr, size) debug_realloc(ptr, size, __FILE__, __LINE__, __func__)
 
-    void* debug_malloc(const size_t size) {
-        printf("malloc(size=%zu)\n", size);
-        #undef malloc
+    // Debug malloc function with metadata
+    void* debug_malloc(const size_t size, const char* file, int line, const char* func) {
+        printf("malloc(size=%zu) called from file: %s, line: %d, function: %s\n", size, file, line, func);
+
+        // Temporarily undefine malloc to call the real malloc
+    #undef malloc
         void* ptr = malloc(size);  // Call the real malloc
-        #define malloc(size) debug_malloc(size)
-        if(ptr == NULL) PANIC("Failed to allocate %zu bytes.", size);
+    #define malloc(size) debug_malloc(size, __FILE__, __LINE__, __func__)
+
+        if (ptr == NULL) {
+            fprintf(stderr, "PANIC: Failed to allocate %zu bytes in file %s, line %d, function %s\n", size, file, line, func);
+            exit(EXIT_FAILURE);  // Replace PANIC with exit for simplicity
+        }
         return ptr;
     }
 
-    void* debug_realloc(void* ptr, const size_t size) {
+    // Debug realloc function with metadata
+    void* debug_realloc(void* ptr, const size_t size, const char* file, int line, const char* func) {
+        printf("realloc(ptr=%p, size=%zu) called from file: %s, line: %d, function: %s\n", ptr, size, file, line, func);
+
+        // Temporarily undefine realloc to call the real realloc
     #undef realloc
-            void* new_ptr = realloc(ptr, size);  // Call the real realloc
-    #define realloc(ptr, size) debug_realloc(ptr, size)
-            if(new_ptr == NULL) PANIC("Failed to reallocate %zu bytes.", size);
-            return new_ptr;
+        void* new_ptr = realloc(ptr, size);  // Call the real realloc
+    #define realloc(ptr, size) debug_realloc(ptr, size, __FILE__, __LINE__, __func__)
+
+        if (new_ptr == NULL) {
+            fprintf(stderr, "PANIC: Failed to reallocate %zu bytes in file %s, line %d, function %s\n", size, file, line, func);
+            exit(EXIT_FAILURE);  // Replace PANIC with exit for simplicity
         }
+        return new_ptr;
+    }
 #endif // not NDEBUG
 
 // Function to check if the file is a regular file using stat
 int is_regular_file(const char *filename) {
     struct stat fileStat;
-    if (stat(filename, &fileStat) != 0) return 0; // File does not exist or is in a error state
+    if (stat(filename, &fileStat) != 0) return 0; // File does not exist or is in an error state
     return S_ISREG(fileStat.st_mode); // Check if it's a regular file
 }
 
@@ -148,13 +194,13 @@ char *readFile(const char *filename, size_t *out_size) {
     return buffer;
 }
 
-struct PushConstants {
+typedef struct {
     vec3 cameraEye    __attribute__((aligned(16)));
     vec3 cameraCenter __attribute__((aligned(16)));
     vec3 cameraUp     __attribute__((aligned(16)));
     float time;
     int stage;
-};
+} PushConstants;
 
 
 SDL_Window* g_window;
@@ -203,6 +249,7 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
     VkDebugUtilsMessageTypeFlagsEXT messageType,
     const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData,
+    // ReSharper disable once CppParameterMayBeConstPtrOrRef
     void *pUserData
 ) {
     (void)messageType; (void)pUserData; // Suppressed "Unused Parameter" warning
@@ -215,6 +262,7 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
 }
 
 void initWindow() {
+    SCOPE_TIMER;
     printf("Trying to initialize window.\n");
 
     if(SDL_Init(SDL_INIT_VIDEO) != 0) {
@@ -451,14 +499,15 @@ QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device) {
     return indices;
 }
 
-struct SwapChainSupportDetails {
+typedef struct {
     VkSurfaceCapabilitiesKHR capabilities;
     VkSurfaceFormatKHR* formats;
     uint32_t num_formats;
     VkPresentModeKHR* present_modes;
     uint32_t num_present_modes;
-};
-void SwapChainSupportDetails_free(struct SwapChainSupportDetails* details) {
+}SwapChainSupportDetails;
+
+void SwapChainSupportDetails_free(SwapChainSupportDetails* details) {
     if (details == NULL) return;
     free(details->formats); free(details->present_modes);
     details->formats = NULL; details->present_modes = NULL;
@@ -468,7 +517,7 @@ void SwapChainSupportDetails_free(struct SwapChainSupportDetails* details) {
 }
 
 //@DS:NEEDS_FREE_AFTER_USE
-void querySwapChainSupport(VkPhysicalDevice device, struct SwapChainSupportDetails* details) {
+void querySwapChainSupport(VkPhysicalDevice device, SwapChainSupportDetails* details) {
     details->formats=NULL;
     details->num_formats=0;
     details->present_modes=NULL;
@@ -543,7 +592,7 @@ bool isDeviceSuitable(VkPhysicalDevice device) {
     free(available_extensions);
     printf("Device supports the necessary extensions.\n");
 
-    struct SwapChainSupportDetails details;
+    SwapChainSupportDetails details;
     querySwapChainSupport(device, &details);
     bool swapchain_is_supported = (details.num_formats > 0) && (details.num_present_modes > 0);
     SwapChainSupportDetails_free(&details);
@@ -735,7 +784,7 @@ VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags a
 }
 
 void createSwapChain() {
-    struct SwapChainSupportDetails details;
+    SwapChainSupportDetails details;
     querySwapChainSupport(g_physical_device, &details);
 
     VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(details.formats, details.num_formats);
@@ -792,9 +841,10 @@ void createSwapChain() {
 
     SwapChainSupportDetails_free(&details);
 
-    g_swap_chain_image_views = malloc(g_num_swap_chain_images * sizeof(VkImageView));
+    g_num_swap_chain_image_views = g_num_swap_chain_images;
+    g_swap_chain_image_views = malloc(g_num_swap_chain_image_views * sizeof(VkImageView));
 
-    for (size_t i = 0; i < g_num_swap_chain_images; i++) {
+    for (size_t i = 0; i < g_num_swap_chain_image_views; i++) {
         g_swap_chain_image_views[i] = createImageView(g_swap_chain_images[i], g_swap_chain_image_format, VK_IMAGE_ASPECT_COLOR_BIT, 1);
     }
 }
@@ -937,16 +987,16 @@ VkShaderModule createShaderModule(const char* code, size_t code_length) {
     return shaderModule;
 }
 
-struct Vertex {
+typedef struct {
     vec3 pos;
     vec3 normal;
     vec2 texCoord;
-};
+} Vertex;
 
 VkVertexInputBindingDescription getVertexBindingDescription() {
     const VkVertexInputBindingDescription bindingDescription = {
         .binding = 0,
-        .stride = sizeof(struct Vertex),
+        .stride = sizeof(Vertex),
         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
     };
     return bindingDescription;
@@ -959,17 +1009,17 @@ VkVertexInputAttributeDescription* getVertexAttributeDescription(uint32_t* num_a
         .binding = 0,
         .location = 0,
         .format = VK_FORMAT_R32G32B32_SFLOAT,
-        .offset = offsetof(struct Vertex, pos)};
+        .offset = offsetof(Vertex, pos)};
     attributes[1] = (VkVertexInputAttributeDescription){
         .binding = 0,
         .location = 1,
         .format = VK_FORMAT_R32G32B32_SFLOAT,
-        .offset = offsetof(struct Vertex, normal)};
+        .offset = offsetof(Vertex, normal)};
     attributes[2] = (VkVertexInputAttributeDescription){
         .binding = 0,
         .location = 2,
         .format = VK_FORMAT_R32G32_SFLOAT,
-        .offset = offsetof(struct Vertex, texCoord)};
+        .offset = offsetof(Vertex, texCoord)};
     return attributes;
 }
 
@@ -1088,7 +1138,7 @@ void createGraphicsPipeline() {
     VkPushConstantRange pushConstantRange = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset = 0,
-        .size = sizeof(struct PushConstants)};
+        .size = sizeof(PushConstants)};
 
     fprintf(stdout, "\tInitializing Render Pipeline.\n");
     VkPipelineLayoutCreateInfo pipelineLayoutInfo = {
@@ -1158,10 +1208,10 @@ void createImage(
     VkImageTiling tiling,
     VkImageUsageFlags usage,
     VkMemoryPropertyFlags properties,
-    VkImage &image,
-    VkDeviceMemory &imageMemory)
+    VkImage *image,
+    VkDeviceMemory *imageMemory)
 {
-    const VkImageCreateInfo imageInfo{
+    const VkImageCreateInfo imageInfo = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .imageType = VK_IMAGE_TYPE_2D,
         .format = format,
@@ -1172,21 +1222,24 @@ void createImage(
         .tiling = tiling,
         .usage = usage,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
+    };
 
-    if (vkCreateImage(g_device, &imageInfo, NULL, &image) != VK_SUCCESS) PANIC("failed to create image!");
+    if (vkCreateImage(g_device, &imageInfo, NULL, image) != VK_SUCCESS)
+        PANIC("failed to create image!");
 
     VkMemoryRequirements memRequirements;
-    vkGetImageMemoryRequirements(g_device, image, &memRequirements);
+    vkGetImageMemoryRequirements(g_device, *image, &memRequirements);
 
-    VkMemoryAllocateInfo allocInfo{};
+    VkMemoryAllocateInfo allocInfo = {};
     allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocInfo.allocationSize = memRequirements.size;
     allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
 
-    if (vkAllocateMemory(g_device, &allocInfo, NULL, &imageMemory) != VK_SUCCESS) PANIC("failed to allocate image memory!");
+    if (vkAllocateMemory(g_device, &allocInfo, NULL, imageMemory) != VK_SUCCESS)
+        PANIC("failed to allocate image memory!");
 
-    vkBindImageMemory(g_device, image, imageMemory, 0);
+    vkBindImageMemory(g_device, *image, *imageMemory, 0);
 }
 
 
@@ -1200,8 +1253,8 @@ void createColorResources() {
         VK_IMAGE_TILING_OPTIMAL,
         VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        g_color_image,
-        g_color_image_memory);
+        &g_color_image,
+        &g_color_image_memory);
     g_color_image_view = createImageView(g_color_image, g_swap_chain_image_format, VK_IMAGE_ASPECT_COLOR_BIT, 1);
 }
 
@@ -1216,17 +1269,17 @@ void createDepthResources() {
         VK_IMAGE_TILING_OPTIMAL,
         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        g_depth_image,
-        g_depth_image_memory);
+        &g_depth_image,
+        &g_depth_image_memory);
     g_depth_image_view = createImageView(g_depth_image, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
 }
 
 void createFramebuffers() {
     g_num_swap_chain_framebuffers = g_num_swap_chain_image_views;
-    g_swap_chain_framebuffers = malloc(g_num_swap_chain_framebuffers* sizeof(VkImageView));
+    g_swap_chain_framebuffers = malloc(g_num_swap_chain_framebuffers * sizeof(VkImageView));
     for (size_t i = 0; i < g_num_swap_chain_framebuffers; i++) {
         fprintf(stdout, "\t%zu. Framebuffers.\n", i + 1);
-        VkFramebufferCreateInfo framebufferInfo{
+        VkFramebufferCreateInfo framebufferInfo = {
             .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
             .renderPass = g_render_pass,
             .attachmentCount = 3,
@@ -1286,30 +1339,45 @@ int main() {
     /*
      * CLEANUP Code
      */
-    vkDestroyCommandPool(g_device, g_command_pool, NULL);
-    vkDestroyPipeline(g_device, g_graphics_pipeline, NULL); g_graphics_pipeline = VK_NULL_HANDLE;
-    vkDestroyPipelineLayout(g_device, g_pipeline_layout, NULL); g_pipeline_layout = VK_NULL_HANDLE;
-
-    vkDestroyDescriptorSetLayout(g_device, g_descriptor_set_layout, NULL); g_descriptor_set_layout = VK_NULL_HANDLE;
-
-    vkDestroyRenderPass(g_device, g_render_pass, NULL); g_render_pass = VK_NULL_HANDLE;
-
-    for(size_t i = 0; i < g_num_swap_chain_framebuffers; i++)  vkDestroyFramebuffer(g_device, &g_swap_chain_framebuffers[i];
-    free(g_swap_chain_framebuffers);
+    vkDestroyCommandPool        (g_device, g_command_pool          , NULL); g_command_pool          = VK_NULL_HANDLE;
+    vkDestroyPipeline           (g_device, g_graphics_pipeline     , NULL); g_graphics_pipeline     = VK_NULL_HANDLE;
+    vkDestroyPipelineLayout     (g_device, g_pipeline_layout       , NULL); g_pipeline_layout       = VK_NULL_HANDLE;
+    vkDestroyDescriptorSetLayout(g_device, g_descriptor_set_layout , NULL); g_descriptor_set_layout = VK_NULL_HANDLE;
+    vkDestroyRenderPass         (g_device, g_render_pass           , NULL); g_render_pass           = VK_NULL_HANDLE;
+    vkDestroyImage              (g_device, g_color_image           , NULL); g_color_image           = VK_NULL_HANDLE;
+    vkDestroyImageView          (g_device, g_color_image_view      , NULL); g_color_image_view      = VK_NULL_HANDLE;
+    vkFreeMemory                (g_device, g_color_image_memory    , NULL); g_color_image_memory    = VK_NULL_HANDLE;
+    vkDestroyImage              (g_device, g_depth_image           , NULL); g_depth_image           = VK_NULL_HANDLE;
+    vkDestroyImageView          (g_device, g_depth_image_view      , NULL); g_depth_image_view      = VK_NULL_HANDLE;
+    vkFreeMemory                (g_device, g_depth_image_memory    , NULL); g_depth_image_memory    = VK_NULL_HANDLE;
 
     for (size_t i = 0; i < g_num_swap_chain_images; i++) vkDestroyImageView(g_device, g_swap_chain_image_views[i], NULL);
-    free(g_swap_chain_image_views);
+    free(g_swap_chain_image_views); g_swap_chain_image_views = NULL;
 
-    free(g_swap_chain_images);
+    for (size_t i = 0; i < g_num_swap_chain_framebuffers; i++) vkDestroyFramebuffer(g_device, g_swap_chain_framebuffers[i], NULL);
+    free(g_swap_chain_framebuffers); g_swap_chain_framebuffers = NULL;
+
+    free(g_swap_chain_images); g_swap_chain_images = NULL;
+
     vkDestroySwapchainKHR(g_device, g_swap_chain, NULL); g_swap_chain = VK_NULL_HANDLE;
-    vkDestroyDevice(g_device, NULL); g_device = VK_NULL_HANDLE;
+    vkDestroyDevice      (g_device, NULL); g_device = VK_NULL_HANDLE;
+
     vkDestroySurfaceKHR(g_instance, g_surface, NULL); g_surface = VK_NULL_HANDLE;
-    const PFN_vkDestroyDebugUtilsMessengerEXT func = (PFN_vkDestroyDebugUtilsMessengerEXT)(vkGetInstanceProcAddr(g_instance, "vkDestroyDebugUtilsMessengerEXT"));
-    if(func != NULL) func(g_instance, g_debug_messenger, NULL);
-    g_debug_messenger = NULL;
+
+    const PFN_vkDestroyDebugUtilsMessengerEXT func = (PFN_vkDestroyDebugUtilsMessengerEXT)
+        (vkGetInstanceProcAddr(g_instance, "vkDestroyDebugUtilsMessengerEXT"));
+
+    if (func != NULL) {
+        func(g_instance, g_debug_messenger, NULL);
+        g_debug_messenger = VK_NULL_HANDLE;
+    }
+
     vkDestroyInstance(g_instance, NULL); g_instance = VK_NULL_HANDLE;
 
-    if(g_window) SDL_DestroyWindow(g_window); g_window = NULL;
+    if (g_window) {
+        SDL_DestroyWindow(g_window);
+        g_window = NULL;
+    }
     SDL_Quit();
 
     return EXIT_SUCCESS;
