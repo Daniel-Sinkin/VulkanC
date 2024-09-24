@@ -60,3 +60,5 @@ VulkanEngine
 /.venv
 
 *.spv
+
+/assets
