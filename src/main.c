@@ -289,6 +289,9 @@ VkPipelineLayout g_pipeline_layout = VK_NULL_HANDLE;
 
 VkCommandPool g_command_pool = VK_NULL_HANDLE;
 
+VkCommandBuffer* g_command_buffers;
+uint32_t g_num_command_buffers;
+
 VkSampleCountFlagBits g_MSAASamples;
 
 VkQueue g_graphics_queue = VK_NULL_HANDLE;
@@ -311,6 +314,15 @@ void** g_uniform_buffers_mapped;
 VkDescriptorPool g_descriptor_pool;
 VkDescriptorSet* g_descriptor_sets;
 uint32_t g_num_descriptor_sets;
+
+VkSemaphore* g_image_available_semaphores;
+uint32_t g_num_image_available_semaphores;
+
+VkSemaphore* g_render_finished_semaphores;
+uint32_t g_num_render_finished_semaphores;
+
+VkFence* g_in_flight_fences;
+uint32_t g_num_in_flight_fences;
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     // ReSharper disable once CppParameterMayBeConst
@@ -1850,6 +1862,45 @@ void createDescriptorSets() {
     }
 }
 
+void createCommandBuffers() {
+    g_num_command_buffers = MAX_FRAMES_IN_FLIGHT;
+    g_command_buffers = malloc(g_num_command_buffers * sizeof(VkCommandBuffer));
+
+    const VkCommandBufferAllocateInfo allocInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = g_command_pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 2};
+
+    if (vkAllocateCommandBuffers(g_device, &allocInfo, g_command_buffers) != VK_SUCCESS) PANIC("failed to allocate command buffers!");
+}
+
+void createSyncObjects() {
+    g_num_image_available_semaphores = MAX_FRAMES_IN_FLIGHT;
+    g_num_render_finished_semaphores = MAX_FRAMES_IN_FLIGHT;
+    g_num_in_flight_fences = MAX_FRAMES_IN_FLIGHT;
+
+    g_image_available_semaphores = malloc(g_num_image_available_semaphores * sizeof(VkSemaphore));
+    g_render_finished_semaphores = malloc(g_num_render_finished_semaphores * sizeof(VkSemaphore));
+    g_in_flight_fences = malloc(g_num_in_flight_fences * sizeof(VkFence));
+
+    const VkSemaphoreCreateInfo semaphoreInfo = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    const VkFenceCreateInfo fenceInfo = {
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .flags = VK_FENCE_CREATE_SIGNALED_BIT};
+
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        fprintf(stdout, "\t%zu. frame\n", i + 1);
+        const VkResult result_1 = vkCreateSemaphore(g_device, &semaphoreInfo, NULL, &g_image_available_semaphores[i]);
+        if (result_1 != VK_SUCCESS) PANIC("failed to create ImageAvailable semaphore!");
+        const VkResult result_2 = vkCreateSemaphore(g_device, &semaphoreInfo, NULL, &g_render_finished_semaphores[i]);
+        if (result_2 != VK_SUCCESS) PANIC("failed to create RenderFinished semaphore!");
+        const VkResult result_3 = vkCreateFence(g_device, &fenceInfo, NULL, &g_in_flight_fences[i]);
+        if (result_3 != VK_SUCCESS) PANIC("failed to create InFlight fence!");
+    }
+}
+
+
 int main() {
     printf("Initializing window.\n");
     initWindow();
@@ -1911,6 +1962,9 @@ int main() {
     createDescriptorPool();
     createDescriptorSets();
 
+    createCommandBuffers();
+    createSyncObjects();
+
     SDL_Event e;
     g_is_running = true;
     while (g_is_running){
@@ -1922,6 +1976,14 @@ int main() {
     /*
      * CLEANUP Code
      */
+    for(size_t i = 0; i < g_num_image_available_semaphores; i++) vkDestroySemaphore(g_device, g_image_available_semaphores[i], NULL);
+    for(size_t i = 0; i < g_num_render_finished_semaphores; i++) vkDestroySemaphore(g_device, g_render_finished_semaphores[i], NULL);
+    for(size_t i = 0; i < g_num_in_flight_fences; i++) vkDestroyFence(g_device, g_in_flight_fences[i], NULL);
+    free(g_image_available_semaphores); free(g_render_finished_semaphores); free(g_in_flight_fences);
+
+    vkFreeCommandBuffers(g_device, g_command_pool, g_num_command_buffers, g_command_buffers);
+    free(g_command_buffers); g_command_buffers = VK_NULL_HANDLE;
+
     free(g_descriptor_sets); g_descriptor_sets = VK_NULL_HANDLE;
     vkDestroyDescriptorPool(g_device, g_descriptor_pool, NULL);
 
