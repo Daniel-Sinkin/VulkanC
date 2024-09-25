@@ -151,8 +151,7 @@ start_timer(&_timer_instance, __FILE__, __LINE__, __func__);
         free(ptr);  // Call the real free
         #define free(ptr) debug_free(ptr, #ptr, __FILE__, __LINE__, __func__)
     }
-
-#endif // not NDEBUGG
+#endif
 
 // Function to check if the file is a regular file using stat
 int is_regular_file(const char *filename) {
@@ -308,6 +307,10 @@ VkSampler g_texture_sampler;
 VkBuffer* g_uniform_buffers;
 VkDeviceMemory* g_uniform_buffers_memory;
 void** g_uniform_buffers_mapped;
+
+VkDescriptorPool g_descriptor_pool;
+VkDescriptorSet* g_descriptor_sets;
+uint32_t g_num_descriptor_sets;
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     // ReSharper disable once CppParameterMayBeConst
@@ -1775,6 +1778,78 @@ void cleanupUniformBuffers() {
     }
 }
 
+void createDescriptorPool() {
+    const size_t num_models = 2;
+    const size_t total_sets = MAX_FRAMES_IN_FLIGHT * num_models;
+
+    VkDescriptorPoolSize poolSizes[] = {
+        { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER        , .descriptorCount = (uint32_t)total_sets },
+        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = (uint32_t)total_sets }
+    };
+
+    const VkDescriptorPoolCreateInfo poolInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .poolSizeCount = 2,
+        .pPoolSizes = poolSizes,
+        .maxSets = (uint32_t)total_sets};
+
+    if (vkCreateDescriptorPool(g_device, &poolInfo, NULL, &g_descriptor_pool) != VK_SUCCESS) PANIC("failed to create descriptor pool!");
+}
+
+void createDescriptorSets() {
+    const size_t numModels = 2;
+    const size_t total_sets = MAX_FRAMES_IN_FLIGHT * numModels;
+
+    VkDescriptorSetLayout* layouts = malloc(total_sets * sizeof(VkDescriptorSetLayout));
+    for(size_t i = 0; i < total_sets; i++) layouts[i] = g_descriptor_set_layout;
+
+    const VkDescriptorSetAllocateInfo allocInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = g_descriptor_pool,
+        .descriptorSetCount = (uint32_t)total_sets,
+        .pSetLayouts = layouts};
+
+    g_num_descriptor_sets = total_sets;
+    g_descriptor_sets = malloc(g_num_descriptor_sets * sizeof(VkDescriptorSet));
+    if (vkAllocateDescriptorSets(g_device, &allocInfo, g_descriptor_sets) != VK_SUCCESS) PANIC("failed to allocate descriptor sets!");
+    free(layouts);
+
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        for (size_t j = 0; j < numModels; j++) {
+            const size_t bufferIndex = i * numModels + j;
+            VkDescriptorBufferInfo bufferInfo = {
+                .buffer = g_uniform_buffers[bufferIndex],
+                .offset = 0,
+                .range = sizeof(UniformBufferObject)};
+
+            VkDescriptorImageInfo imageInfo = {
+                .sampler = g_texture_sampler,
+                .imageView = g_texture_image_view,
+                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+
+            VkWriteDescriptorSet descriptorWrites[2];
+            descriptorWrites[0] = (VkWriteDescriptorSet){
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = g_descriptor_sets[bufferIndex],
+                .dstBinding = 0,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .pBufferInfo = &bufferInfo};
+            descriptorWrites[1] = (VkWriteDescriptorSet){
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = g_descriptor_sets[bufferIndex],
+                .dstBinding = 1,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo = &imageInfo};
+
+            vkUpdateDescriptorSets(g_device, 2, descriptorWrites, 0, NULL);
+        }
+    }
+}
+
 int main() {
     printf("Initializing window.\n");
     initWindow();
@@ -1833,6 +1908,9 @@ int main() {
 
     createUniformBuffers();
 
+    createDescriptorPool();
+    createDescriptorSets();
+
     SDL_Event e;
     g_is_running = true;
     while (g_is_running){
@@ -1844,6 +1922,9 @@ int main() {
     /*
      * CLEANUP Code
      */
+    free(g_descriptor_sets); g_descriptor_sets = VK_NULL_HANDLE;
+    vkDestroyDescriptorPool(g_device, g_descriptor_pool, NULL);
+
     cleanupUniformBuffers();
 
     vkDestroySampler(g_device, g_texture_sampler, NULL); g_texture_sampler = VK_NULL_HANDLE;
@@ -1893,6 +1974,6 @@ int main() {
     SDL_Quit();
     printf("Shut down SDL.\n");
 
-    printf("Program finished running, Goodbye!");
+    printf("Program finished running, Goodbye!\n");
     return EXIT_SUCCESS;
 }
