@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <errno.h>
 #include <arm/limits.h>
 #include <sys/stat.h>
@@ -29,12 +30,16 @@
 #define DEFAULT_WINDOW_HEIGHT 600
 #define PROJECT_NAME "Vulkan Engine"
 
+#define NUM_MODELS 2
+
 #define ENABLE_VALIDATION_LAYERS true
 #define ALLOW_DEVICE_WITHOUT_INTEGRATED_GPU true
 #define ALLOW_DEVICE_WITHOUT_GEOMETRY_SHADER true
 
 #define UINT32_UNINITIALIZED_VALUE UINT32_MAX
 #define UINT32_INVALIDED_VALUE 0xDEADBEEF
+
+#define NO_TIMEOUT UINT64_MAX;
 
 #define REQUIRED_VULKAN_API_VERSION VK_API_VERSION_1_3
 
@@ -51,6 +56,11 @@ const float PI_2 = 2.0f * M_PI;
 const float PI_HALF = M_PI / 2.0f;
 const float PI_QUARTER = M_PI / 4.0f;
 const float PI_DEG = 90.0f;
+
+const float CAMERA_MAX_PITCH = 50.0f;
+
+const float CLIPPING_PLANE_NEAR = 0.1f;
+const float CLIPPING_PLANE_FAR = 100.0f;
 
 /* DEBUG FEATURE FLAGS */
 #define MALLOC_DEBUG true
@@ -109,6 +119,8 @@ start_timer(&_timer_instance, __FILE__, __LINE__, __func__);
 // PANIC(err_msg)
 // does not work, we need ot call PANIC("%s", err_msg) instead which is exactly what this new macro does.
 #define PANIC_STR(msg) PANIC("%s", msg)
+
+#define PANIC_NOT_IMPLEMENTED(msg) PANIC("NOT_IMPLEMENTED");
 
 // If we are in debug mode (i.e., when NDEBUG is false), we use this malloc/realloc/free with metadata
 #ifndef NDEBUG
@@ -247,6 +259,15 @@ typedef struct {
     mat4 proj;
 } UniformBufferObject ;
 
+UniformBufferObject UniformBufferObject_create(mat4 model, mat4 view, mat4 proj) {
+    UniformBufferObject ubo;
+    glm_mat4_copy(model, ubo.model);
+    glm_mat4_copy(view, ubo.view);
+    glm_mat4_copy(proj, ubo.proj);
+    return ubo;
+}
+
+
 typedef struct {
     vec3 cameraEye    __attribute__((aligned(16)));
     vec3 cameraCenter __attribute__((aligned(16)));
@@ -323,6 +344,21 @@ uint32_t g_num_render_finished_semaphores;
 
 VkFence* g_in_flight_fences;
 uint32_t g_num_in_flight_fences;
+
+uint32_t g_current_frame_idx; // 0 <= m_CurrentFrameIdx < Max Frames in Flight
+uint32_t g_frame_counter;    // How many frames have been rendered in total
+
+PushConstants g_push_constants;
+
+int g_rendering_stage = 3;
+
+bool g_did_framebuffer_resize = false;
+
+vec3 g_camera_eye = {2.0f, 4.0f, 2.0f};
+vec3 g_camera_center = {0.0f, 0.0f, 0.0f};
+vec3 g_camera_up = {0.0f, 0.0f, 1.0f};
+
+clock_t g_start_time;
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     // ReSharper disable once CppParameterMayBeConst
@@ -1748,7 +1784,7 @@ void createTextureImage() {
 }
 
 void createUniformBuffers() {
-    const size_t num_models = 2;
+    const size_t num_models = NUM_MODELS;
     const size_t total_buffers = MAX_FRAMES_IN_FLIGHT * num_models;
 
     g_uniform_buffers = malloc(total_buffers * sizeof(VkBuffer));
@@ -1780,7 +1816,7 @@ void createUniformBuffers() {
 }
 
 void cleanupUniformBuffers() {
-    const size_t num_models = 2;
+    const size_t num_models = NUM_MODELS;
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         for (size_t j = 0; j < num_models; j++) {
             const size_t buffer_index = i * num_models + j;
@@ -1791,7 +1827,7 @@ void cleanupUniformBuffers() {
 }
 
 void createDescriptorPool() {
-    const size_t num_models = 2;
+    const size_t num_models = NUM_MODELS;
     const size_t total_sets = MAX_FRAMES_IN_FLIGHT * num_models;
 
     VkDescriptorPoolSize poolSizes[] = {
@@ -1809,7 +1845,7 @@ void createDescriptorPool() {
 }
 
 void createDescriptorSets() {
-    const size_t numModels = 2;
+    const size_t numModels = NUM_MODELS;
     const size_t total_sets = MAX_FRAMES_IN_FLIGHT * numModels;
 
     VkDescriptorSetLayout* layouts = malloc(total_sets * sizeof(VkDescriptorSetLayout));
@@ -1900,8 +1936,207 @@ void createSyncObjects() {
     }
 }
 
+void recreateSwapChain() {
+    PANIC("NOT_IMPLEMENTED");
+    /*
+    int width = 0, height = 0;
+    glfwGetFramebufferSize(m_Window, &width, &height);
+    while (width == 0 || height == 0) {
+        glfwGetFramebufferSize(m_Window, &width, &height);
+        glfwWaitEvents();
+    }
+
+    vkDeviceWaitIdle(m_Device);
+
+    cleanupSwapChain();
+
+    createSwapChain();
+    createImageViews();
+    createRenderPass();
+    createGraphicsPipeline();
+    createColorResources();
+    createDepthResources();
+    createFramebuffers();
+
+    // Recreate uniform buffers and descriptor sets
+    createUniformBuffers();
+    createDescriptorPool();
+    createDescriptorSets();
+
+    // No need to recreate command buffers if you reset them each frame
+    */
+}
+
+void updatePushConstants() {
+    memcpy(g_push_constants.cameraCenter, g_camera_center, sizeof(vec3));
+    memcpy(g_push_constants.cameraEye, g_camera_eye, sizeof(vec3));
+    memcpy(g_push_constants.cameraUp, g_camera_up, sizeof(vec3));
+    g_push_constants.stage = g_rendering_stage;
+
+    // Get current time using clock() from <time.h>
+    const clock_t current_time = clock();
+
+    // Compute delta time in seconds (clock() returns time in clock ticks)
+    const float delta_time = (float)(current_time - g_start_time) / CLOCKS_PER_SEC;
+
+    // Store deltaTime in push constants
+    g_push_constants.time = delta_time;
+}
+
+void record_command_buffers(VkCommandBuffer commandBuffer, const uint32_t imageIndex) {
+    const VkCommandBufferBeginInfo beginInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+
+    if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) PANIC("failed to begin recording command buffer!");
+
+    #define num_clear_values 2
+    VkClearValue clearValues[num_clear_values];
+    clearValues[0].color.float32[0] = 0.0f;
+    clearValues[0].color.float32[1] = 0.0f;
+    clearValues[0].color.float32[2] = 0.0f;
+    clearValues[0].color.float32[3] = 1.0f;
+    clearValues[1].depthStencil.depth = 1.0f;
+    clearValues[1].depthStencil.stencil = 0;
+
+    const VkRenderPassBeginInfo renderPassInfo{
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        .renderPass = g_render_pass,
+        .framebuffer = g_swap_chain_framebuffers[imageIndex],
+        .renderArea = {.offset = {0, 0}, .extent = g_swap_chain_extent},
+        .clearValueCount = (uint32_t)num_clear_values,
+        .pClearValues = clearValues};
+    #undef num_clear_values
+
+    vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_GraphicsPipeline);
+
+    VkViewport viewport{
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = (float)g_swap_chain_extent.width,
+        .height = (float)>g_swap_chain_extent.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f};
+    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+
+    VkRect2D scissor{
+        .offset = {0, 0},
+        .extent = g_swap_chain_extent};
+    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+    updatePushConstants();
+    vkCmdPushConstants(
+        commandBuffer,
+        g_pipeline_layout,
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        0,
+        sizeof(PushConstants),
+        &g_push_constants);
+
+    for (size_t j = 0; j < 2; j++) {
+        const size_t descriptorSetIndex = g_current_frame_idx * NUM_MODELS + j;
+        VkDescriptorSet descriptorSet = g_descriptor_sets[descriptorSetIndex];
+
+        if (descriptorSet == VK_NULL_HANDLE) PANIC("Invalid descriptor set handle!");
+
+        m_Models[j]->enqueueIntoCommandBuffer(commandBuffer, descriptorSet);
+    }
+    vkCmdEndRenderPass(commandBuffer);
+    if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) PANIC("failed to record command buffer!");
+}
+
+// Function to create the UBO
+UniformBufferObject get_UBO() {
+    if (g_start_time == 0) g_start_time = clock();
+    clock_t current_time = clock();
+    float delta_time = (float)(current_time - g_start_time) / CLOCKS_PER_SEC;
+
+    mat4 view;
+    glm_lookat(g_camera_eye, g_camera_center, g_camera_up, view);
+
+    mat4 proj;
+    glm_perspective(PI_QUARTER, (float)(g_swap_chain_extent.width) / (float)(g_swap_chain_extent.height),
+                    CLIPPING_PLANE_NEAR, CLIPPING_PLANE_FAR, proj);
+    proj[1][1] *= -1; // Vulkan and OpenGL have opposite y orientation, and (c)glm is mainly written for openGL
+
+    mat4 model_matrix;
+    glm_mat4_identity(model_matrix);
+
+    return UniformBufferObject_create(model_matrix, view, proj);
+}
+
+
+void drawFrame() {
+    vkWaitForFences(g_device, 1, &g_in_flight_fences[g_current_frame_idx], VK_TRUE, NO_TIMEOUT);
+
+    uint32_t imageIndex = 0;
+    const VkResult resultNextImage = vkAcquireNextImageKHR(
+        g_device,
+        g_swap_chain,
+        NO_TIMEOUT,
+        g_image_available_semaphores[g_current_frame_idx],
+        VK_NULL_HANDLE,
+        &imageIndex);
+
+    if (resultNextImage == VK_ERROR_OUT_OF_DATE_KHR) {
+        recreateSwapChain();
+        return;
+    }
+    if (resultNextImage != VK_SUCCESS && resultNextImage != VK_SUBOPTIMAL_KHR) PANIC("failed to acquire swap chain image!");
+
+    vkResetFences(g_device, 1, &g_in_flight_fences[g_current_frame_idx]);
+
+    vkResetCommandBuffer(g_command_buffers[g_current_frame_idx], 0);
+    record_command_buffers(g_command_buffers[g_current_frame_idx], imageIndex);
+
+    for (size_t i = 0; i < 2; i++) {
+        UniformBufferObject ubo = get_UBO();
+        const size_t bufferIndex = g_current_frame_idx * 2 + i;
+        memcpy(g_uniform_buffers_mapped[bufferIndex], &ubo, sizeof(ubo));
+    }
+
+    VkSemaphore waitSemaphores[] = {g_image_available_semaphores[g_current_frame_idx]};
+    VkPipelineStageFlags waitStages[] = {(VkPipelineStageFlags)(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)};
+    VkSemaphore signalSemaphores[] = {g_render_finished_semaphores[g_current_frame_idx]};
+    const VkSubmitInfo submitInfo{
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = waitSemaphores,
+        .pWaitDstStageMask = waitStages,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &g_command_buffers[g_current_frame_idx],
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = signalSemaphores};
+
+    if (vkQueueSubmit(g_graphics_queue, 1, &submitInfo, g_in_flight_fences[g_current_frame_idx]) != VK_SUCCESS) PANIC("failed to submit draw command buffer!");
+
+    VkSwapchainKHR swapChains[] = {g_swap_chain};
+    const VkPresentInfoKHR presentInfo{
+        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = signalSemaphores,
+        .swapchainCount = 1,
+        .pSwapchains = swapChains,
+        .pImageIndices = &imageIndex,
+        .pResults = NULL};
+
+    const VkResult resultQueue = vkQueuePresentKHR(g_presentation_queue, &presentInfo);
+    if (resultQueue == VK_ERROR_OUT_OF_DATE_KHR || resultQueue == VK_SUBOPTIMAL_KHR || g_did_framebuffer_resize) {
+        g_did_framebuffer_resize = false;
+        recreateSwapChain();
+    } else if (resultQueue != VK_SUCCESS) {
+        PANIC("failed to present swap chain image!");
+    }
+
+    g_current_frame_idx = (g_current_frame_idx + 1) % MAX_FRAMES_IN_FLIGHT;
+    g_frame_counter += 1;
+}
 
 int main() {
+    /*
+     * Start of Initialization
+     */
     printf("Initializing window.\n");
     initWindow();
     printf("Initializing Instance.\n");
@@ -1964,6 +2199,9 @@ int main() {
 
     createCommandBuffers();
     createSyncObjects();
+    /*
+     * End of Initialization
+     */
 
     SDL_Event e;
     g_is_running = true;
@@ -1971,6 +2209,7 @@ int main() {
         while (SDL_PollEvent(&e)){
             handleInput(e);
         }
+        drawFrame();
     }
 
     /*
